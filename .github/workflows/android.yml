@@ -1,0 +1,81 @@
+name: Docker-Android 云手机
+
+on:
+  workflow_dispatch:
+    inputs:
+      android_version:
+        description: 'Android 版本'
+        required: true
+        type: choice
+        default: '11.0'
+        options:
+          - '9.0'
+          - '10.0'
+          - '11.0'
+          - '12.0'
+          - '13.0'
+          - '14.0'
+      device_model:
+        description: '手机型号'
+        required: true
+        type: choice
+        default: 'Samsung Galaxy S10'
+        options:
+          - 'Samsung Galaxy S10'
+          - 'Samsung Galaxy S9'
+          - 'Samsung Galaxy S8'
+          - 'Samsung Galaxy S7 Edge'
+          - 'Samsung Galaxy S7'
+          - 'Samsung Galaxy S6'
+          - 'Nexus 4'
+          - 'Nexus 5'
+          - 'Nexus One'
+          - 'Nexus S'
+          - 'Nexus 7'
+          - 'Pixel C'
+      vnc_password:
+        description: 'VNC 密码 (可选)'
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 启用 KVM 加速
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger
+          sudo chmod 666 /dev/kvm
+
+      - name: 启动 Docker-Android 容器
+        run: |
+          docker run -d \
+            -p 6080:6080 \
+            -e EMULATOR_DEVICE="${{ github.event.inputs.device_model }}" \
+            -e WEB_VNC=true \
+            ${{ github.event.inputs.vnc_password != '' && format('-e VNC_PASSWORD="{0}"', github.event.inputs.vnc_password) || '' }} \
+            --device /dev/kvm \
+            --name android-container \
+            budtmo/docker-android:emulator_${{ github.event.inputs.android_version }}
+          sleep 10
+
+      - name: 安装并启动 Cloudflared 隧道
+        run: |
+          curl -L -o cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared.deb
+          nohup cloudflared tunnel --url http://localhost:6080 > cf.log 2>&1 &
+          sleep 15
+          CF_URL=$(grep -o 'https://[-a-zA-Z0-9]*\.trycloudflare\.com' cf.log | head -n 1)
+          echo "CF_URL=$CF_URL" >> $GITHUB_ENV
+
+      - name: 显示访问地址
+        run: |
+          echo "=========================================="
+          echo "✅ Docker-Android 部署完成！"
+          echo "🔗 公网访问地址: ${{ env.CF_URL }}"
+          echo "=========================================="
+          echo "等待 6 小时后自动停止..."
+          sleep 21600
