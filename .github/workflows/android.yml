@@ -46,7 +46,7 @@ on:
         required: true
         default: '420'
       root_mode:
-        description: 'Root 权限'
+        description: 'Root 权限 (仅pro版支持，普通版无效)'
         required: true
         type: choice
         default: 'without-root'
@@ -75,29 +75,51 @@ jobs:
 
       - name: 启动 Docker-Android 容器
         run: |
-          # 组装基础环境变量
-          ENV_VARS=(
-            "-e EMULATOR_DEVICE=\"${{ github.event.inputs.device_model }}\""
-            "-e WEB_VNC=true"
-            "-e EMULATOR_ADDITIONAL_ARGS=\"-screen ${SCREEN_WIDTH}x${SCREEN_HEIGHT} -dpi-device ${DPI}\""
-          )
-
-          # 组装端口映射
-          PORT_MAPPINGS=(
-            "-p 6080:6080"   # Web UI
-          )
-
-          # 根据输入参数决定是否开启 ADB 端口映射
+          # 基础端口（Web UI）
+          PORTS="-p 6080:6080"
+          
+          # 可选 ADB 端口
           if [ "${{ github.event.inputs.enable_adb }}" == "true" ]; then
-            PORT_MAPPINGS+=("-p 5554:5554" "-p 5555:5555")
+            PORTS="$PORTS -p 5554:5554 -p 5555:5555"
           fi
-
-          # 组装 Docker 运行命令并执行
+          
+          # 可选 Root（普通版无效，仅保留参数占位）
+          ROOT_ENV=""
+          if [ "${{ github.event.inputs.root_mode }}" == "with-root" ]; then
+            echo "⚠️ 普通版 docker-android 不支持 root，容器将以非 root 运行"
+          fi
+          
+          # 启动容器
           docker run -d \
-            "${PORT_MAPPINGS[@]}" \
-            "${ENV_VARS[@]}" \
+            $PORTS \
+            -e EMULATOR_DEVICE="${{ github.event.inputs.device_model }}" \
+            -e WEB_VNC=true \
+            -e EMULATOR_ADDITIONAL_ARGS="-screen ${{ github.event.inputs.screen_width }}x${{ github.event.inputs.screen_height }} -dpi-device ${{ github.event.inputs.dpi }}" \
             --device /dev/kvm \
             --name android-container \
             budtmo/docker-android:emulator_${{ github.event.inputs.android_version }}
+          
+          echo "等待模拟器初始化..."
+          sleep 15
 
-      # ... (后续的隧道、监控步骤保持不变)
+      - name: 安装并启动 Cloudflared 隧道
+        run: |
+          curl -L -o cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared.deb
+          nohup cloudflared tunnel --url http://localhost:6080 > cf.log 2>&1 &
+          sleep 15
+          CF_URL=$(grep -o 'https://[-a-zA-Z0-9]*\.trycloudflare\.com' cf.log | head -n 1)
+          echo "CF_URL=$CF_URL" >> $GITHUB_ENV
+
+      - name: 输出访问信息
+        run: |
+          echo "=========================================="
+          echo "✅ Docker-Android 部署成功！"
+          echo "🔗 公网访问地址: ${{ env.CF_URL }}"
+          if [ "${{ github.event.inputs.enable_adb }}" == "true" ]; then
+            echo "📱 ADB 连接命令: adb connect localhost:5555"
+          fi
+          echo "⚠️  手机型号可能显示为 generic_x86_64，但分辨率/DPI已按设置生效"
+          echo "=========================================="
+          echo "容器将保持运行 6 小时"
+          sleep 21600
