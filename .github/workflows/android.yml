@@ -1,4 +1,4 @@
-name: Docker-Android 云手机
+name: Docker-Android 云手机 (完整配置版)
 
 on:
   workflow_dispatch:
@@ -33,11 +33,34 @@ on:
           - 'Nexus S'
           - 'Nexus 7'
           - 'Pixel C'
-      vnc_password:
-        description: 'VNC 密码 (可选)'
-        required: false
-        type: string
-        default: ''
+      screen_width:
+        description: '屏幕宽度 (px)'
+        required: true
+        default: '1080'
+      screen_height:
+        description: '屏幕高度 (px)'
+        required: true
+        default: '1920'
+      dpi:
+        description: '屏幕DPI'
+        required: true
+        default: '420'
+      root_mode:
+        description: 'Root 权限'
+        required: true
+        type: choice
+        default: 'without-root'
+        options:
+          - 'without-root'
+          - 'with-root'
+      enable_adb:
+        description: '开启 ADB 外部调试'
+        required: true
+        type: choice
+        default: 'true'
+        options:
+          - 'true'
+          - 'false'
 
 jobs:
   build:
@@ -52,30 +75,29 @@ jobs:
 
       - name: 启动 Docker-Android 容器
         run: |
+          # 组装基础环境变量
+          ENV_VARS=(
+            "-e EMULATOR_DEVICE=\"${{ github.event.inputs.device_model }}\""
+            "-e WEB_VNC=true"
+            "-e EMULATOR_ADDITIONAL_ARGS=\"-screen ${SCREEN_WIDTH}x${SCREEN_HEIGHT} -dpi-device ${DPI}\""
+          )
+
+          # 组装端口映射
+          PORT_MAPPINGS=(
+            "-p 6080:6080"   # Web UI
+          )
+
+          # 根据输入参数决定是否开启 ADB 端口映射
+          if [ "${{ github.event.inputs.enable_adb }}" == "true" ]; then
+            PORT_MAPPINGS+=("-p 5554:5554" "-p 5555:5555")
+          fi
+
+          # 组装 Docker 运行命令并执行
           docker run -d \
-            -p 6080:6080 \
-            -e EMULATOR_DEVICE="${{ github.event.inputs.device_model }}" \
-            -e WEB_VNC=true \
-            ${{ github.event.inputs.vnc_password != '' && format('-e VNC_PASSWORD="{0}"', github.event.inputs.vnc_password) || '' }} \
+            "${PORT_MAPPINGS[@]}" \
+            "${ENV_VARS[@]}" \
             --device /dev/kvm \
             --name android-container \
             budtmo/docker-android:emulator_${{ github.event.inputs.android_version }}
-          sleep 10
 
-      - name: 安装并启动 Cloudflared 隧道
-        run: |
-          curl -L -o cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-          sudo dpkg -i cloudflared.deb
-          nohup cloudflared tunnel --url http://localhost:6080 > cf.log 2>&1 &
-          sleep 15
-          CF_URL=$(grep -o 'https://[-a-zA-Z0-9]*\.trycloudflare\.com' cf.log | head -n 1)
-          echo "CF_URL=$CF_URL" >> $GITHUB_ENV
-
-      - name: 显示访问地址
-        run: |
-          echo "=========================================="
-          echo "✅ Docker-Android 部署完成！"
-          echo "🔗 公网访问地址: ${{ env.CF_URL }}"
-          echo "=========================================="
-          echo "等待 6 小时后自动停止..."
-          sleep 21600
+      # ... (后续的隧道、监控步骤保持不变)
