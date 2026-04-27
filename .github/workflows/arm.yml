@@ -1,4 +1,4 @@
-name: QEMU LineageOS 云手机 (Python 解包 boot + 直接内核引导)
+name: QEMU LineageOS 云手机 (Magisk 解包)
 
 on:
   workflow_dispatch:
@@ -12,55 +12,45 @@ jobs:
       - name: 安装依赖
         run: |
           sudo apt update
-          sudo apt install -y qemu-system-arm qemu-utils unzip wget novnc python3-websockify qemu-efi-aarch64 python3
+          sudo apt install -y qemu-system-arm qemu-utils unzip wget novnc python3-websockify qemu-efi-aarch64
 
-      - name: 下载并解包 LineageOS 镜像
+      - name: 下载并解包镜像
         run: |
           mkdir -p ~/lineage-images && cd ~/lineage-images
+          # 下载 UTM 主镜像
           wget -q https://github.com/jqssun/android-lineage-qemu/releases/download/v2026.03.18/UTM-VM-lineage-23.2-20260318-jqssun-virtio_arm64only.zip
           unzip -q UTM-VM-lineage-23.2-20260318-jqssun-virtio_arm64only.zip
           DATA_DIR=$(find . -type d -name "Data" | head -1)
           cp $DATA_DIR/vda.qcow2 system.qcow2
           cp $DATA_DIR/vdb.qcow2 data.qcow2
-          
+
           # 下载 boot.img
           wget -q https://github.com/jqssun/android-lineage-qemu/releases/download/v2026.03.18/boot.img
 
-          # 使用 Python 内联解包 boot.img
-          python3 -c '
-          import struct, os
-          fn = "boot.img"
-          with open(fn, "rb") as f:
-              magic = f.read(8)
-              if magic.decode() != "ANDROID!":
-                  raise Exception("Not an Android boot image")
-              # Android boot image header (8 bytes magic + 56 bytes header)
-              header = struct.unpack("<IIIIIIIIIIIIII", f.read(56))
-              kernel_size = header[0]
-              ramdisk_size = header[2]
-              page_size = header[8]
-              cmdline = f.read(512)  # 命令行动态覆盖，这里不读取
-              f.seek(page_size)
-              kernel_data = f.read(kernel_size)
-              # 计算 ramdisk 位置
-              ramdisk_offset = ((kernel_size + page_size - 1) // page_size) * page_size
-              f.seek(page_size + ramdisk_offset)
-              ramdisk_data = f.read(ramdisk_size) if ramdisk_size else b""
-          with open("kernel", "wb") as kf:
-              kf.write(kernel_data)
-          with open("ramdisk.gz", "wb") as rf:
-              rf.write(ramdisk_data) if ramdisk_data else None
-          print("Extracted kernel and ramdisk.gz")
-                    '
+          # 下载 MagiskBoot 工具 (x86_64 静态编译)
+          wget -q https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk
+          unzip -j Magisk-v27.0.apk "lib/x86_64/libmagiskboot.so" -d .
+          mv libmagiskboot.so magiskboot
+          chmod +x magiskboot
+
+          # 解包 boot.img
+          ./magiskboot unpack boot.img
+          # 解包后生成 kernel 和 ramdisk.cpio (可能是 .gz 或 .cpio)
+          mv kernel kernel
+          mv ramdisk.cpio ramdisk.cpio
 
           echo "解包完成，列出文件："
-          ls -lh kernel ramdisk.gz system.qcow2 data.qcow2
+          ls -lh kernel ramdisk.cpio system.qcow2 data.qcow2
 
       - name: 启动 QEMU (直接内核引导)
         run: |
           cd ~/lineage-images
+          # 准备 UEFI 变量文件（64MB）
           cp /usr/share/AAVMF/AAVMF_VARS.fd my_vars.fd
           chmod 666 my_vars.fd
+
+          # 内核命令行：只保留控制台和硬件信息，root 由 ramdisk 处理
+          CMDLINE="console=ttyAMA0 androidboot.hardware=virtio androidboot.slot_suffix="
 
           qemu-system-aarch64 \
             -M virt \
@@ -70,8 +60,8 @@ jobs:
             -drive if=pflash,format=raw,file=/usr/share/AAVMF/AAVMF_CODE.fd,readonly=on \
             -drive if=pflash,format=raw,file=my_vars.fd \
             -kernel kernel \
-            -initrd ramdisk.gz \
-            -append "console=ttyAMA0 root=/dev/vda rw androidboot.slot_suffix= androidboot.hardware=virtio" \
+            -initrd ramdisk.cpio \
+            -append "${CMDLINE}" \
             -drive file=system.qcow2,format=qcow2,if=virtio,index=0 \
             -drive file=data.qcow2,format=qcow2,if=virtio,index=1 \
             -nic user,hostfwd=tcp::5555-:5555 \
@@ -79,7 +69,7 @@ jobs:
             -daemonize
 
           echo "QEMU 已启动，等待系统启动 (180s)..."
-          sleep 60
+          sleep 30
 
       - name: 建立 noVNC 与隧道
         run: |
