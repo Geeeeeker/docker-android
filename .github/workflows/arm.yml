@@ -1,22 +1,29 @@
-name: ARM64 Android 云手机 (Linux ARM - TCG)
+name: ARM64 Android 云手机 (Linux ARM - 已修复)
 
 on:
   workflow_dispatch:
 
 jobs:
   android:
-    runs-on: ubuntu-22.04-arm   # ARM64 原生环境，无需 KVM 也能运行
+    runs-on: ubuntu-22.04-arm
     timeout-minutes: 360
 
     steps:
-      - name: 启动 Android 模拟器 (ARM64, 无硬件加速)
+      - name: 安装 Java (sdkmanager 必需)
+        run: |
+          sudo apt update
+          sudo apt install -y openjdk-17-jdk
+          echo "JAVA_HOME=/usr/lib/jvm/java-17-openjdk-arm64" >> $GITHUB_ENV
+          echo "$JAVA_HOME/bin" >> $GITHUB_PATH
+
+      - name: 启动 Android 模拟器 (ARM64)
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
           arch: arm64-v8a
           target: google_apis
           profile: pixel_4
-          disable-linux-hw-accel: true      # 关闭 KVM，改用软件模拟（TCG）
+          disable-linux-hw-accel: true
           emulator-options: >-
             -no-window
             -gpu swiftshader_indirect
@@ -25,30 +32,26 @@ jobs:
             -netdelay none
             -netspeed full
           script: |
-            echo "模拟器已启动，正在配置 VNC 和隧道..."
+            echo "模拟器已启动，配置远程桌面和隧道..."
             adb wait-for-device
 
-            # 1. 安装 scrcpy (提供 VNC 输出)
+            # 1. 安装 scrcpy（提供 VNC）
             sudo apt update
             sudo apt install -y scrcpy
-
-            # 启动 scrcpy VNC 服务器 (监听 5900)
             scrcpy --vnc --vnc-addr=0.0.0.0:5900 --no-audio --no-window &
             sleep 5
 
-            # 2. 安装 noVNC + websockify (将 VNC 转为浏览器可访问的网页)
+            # 2. 安装 noVNC + websockify
             sudo apt install -y novnc python3-websockify
             websockify --web /usr/share/novnc 6080 localhost:5900 &
             sleep 3
 
-            # 3. 安装 cloudflared (ARM64 版本)
+            # 3. 安装 cloudflared (ARM64)
             curl -L -o cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64
             chmod +x cloudflared
             sudo mv cloudflared /usr/local/bin/
 
-            # 4. 启动两条隧道：
-            #    ADB 端口 (5555) → TCP 公网
-            #    noVNC 端口 (6080) → HTTP 公网
+            # 4. 启动隧道
             nohup cloudflared tunnel --url tcp://localhost:5555 > adb-tunnel.log 2>&1 &
             nohup cloudflared tunnel --url http://localhost:6080 > vnc-tunnel.log 2>&1 &
             sleep 15
@@ -71,7 +74,6 @@ jobs:
               cat vnc-tunnel.log
             fi
             echo "=========================================="
-            echo "实例将保持运行 6 小时，请尽快使用。"
+            echo "实例保持运行 6 小时。"
 
-            # 保持实例不退出
             sleep 21600
