@@ -1,97 +1,97 @@
-name: ARM64 Android 云手机 (macOS 稳定版)
+name: QEMU LineageOS 云手机 (ARM64 + VNC + ADB)
 
 on:
   workflow_dispatch:
 
 jobs:
-  android:
-    runs-on: macos-14        # Apple Silicon, emulator 二进制可用
+  qemu-android:
+    runs-on: ubuntu-latest      # 使用 x86_64 主机，通过 QEMU 模拟 ARM64
     timeout-minutes: 360
 
     steps:
-      - name: 安装 Java
+      - name: 安装 QEMU 和依赖
         run: |
-          brew install openjdk@17
-          sudo ln -sfn $(brew --prefix)/opt/openjdk@17/libexec/openjdk.jdk /Library/Java/JavaVirtualMachines/openjdk-17.jdk
-          echo "JAVA_HOME=$(brew --prefix)/opt/openjdk@17" >> $GITHUB_ENV
-          echo "$JAVA_HOME/bin" >> $GITHUB_PATH
+          sudo apt update
+          sudo apt install -y qemu-system-arm qemu-utils unzip wget
 
-      - name: 安装 Android SDK
+      - name: 下载 LineageOS 镜像
         run: |
-          export ANDROID_SDK_ROOT=$HOME/android-sdk
-          mkdir -p $ANDROID_SDK_ROOT/cmdline-tools
-          curl -o cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-mac-11076708_latest.zip
-          unzip -q cmdline-tools.zip -d $ANDROID_SDK_ROOT/cmdline-tools
-          mv $ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools $ANDROID_SDK_ROOT/cmdline-tools/latest
-          export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$PATH"
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
-          echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> $GITHUB_PATH
-          
-          yes | sdkmanager --licenses
-          sdkmanager "platforms;android-34" "system-images;android-34;google_apis;arm64-v8a" "emulator" "platform-tools"
-          
-          echo "$ANDROID_SDK_ROOT/emulator" >> $GITHUB_PATH
-          echo "$ANDROID_SDK_ROOT/platform-tools" >> $GITHUB_PATH
+          mkdir -p ~/lineage-images
+          cd ~/lineage-images
+          # 下载主镜像
+          wget -q https://github.com/jqssun/android-lineage-qemu/releases/download/v2026.03.18/UTM-VM-lineage-23.2-20260318-jqssun-virtio_arm64only.zip
+          unzip -q UTM-VM-lineage-23.2-20260318-jqssun-virtio_arm64only.zip
+          # 下载 boot 和 recovery 镜像（可选，备用）
+          wget -q https://github.com/jqssun/android-lineage-qemu/releases/download/v2026.03.18/boot.img
+          wget -q https://github.com/jqssun/android-lineage-qemu/releases/download/v2026.03.18/recovery-userdebug.img
 
-      - name: 创建 AVD 并启动模拟器 (关闭硬件加速)
+      - name: 启动 QEMU 虚拟机
         run: |
-          echo "no" | avdmanager create avd -n test -k "system-images;android-34;google_apis;arm64-v8a" -d pixel_4
-          
-          echo "启动模拟器 (纯软件模拟)..."
-          $ANDROID_SDK_ROOT/emulator/emulator -avd test \
-            -no-window -no-audio -no-boot-anim \
-            -netdelay none -netspeed full \
-            -gpu swiftshader_indirect \
-            -accel off \                # 关键：强制关闭硬件加速，避免 HVF 错误
-            -port 5554 &
-          
-          for i in {1..360}; do
-            if $ANDROID_SDK_ROOT/platform-tools/adb -s emulator-5554 shell getprop sys.boot_completed 2>/dev/null | grep -q '1'; then
-              echo "模拟器启动成功！"
-              break
-            fi
-            echo "等待中... ($i 次尝试)"
-            sleep 5
-          done
-          
-          $ANDROID_SDK_ROOT/platform-tools/adb -s emulator-5554 wait-for-device
-          echo "ADB 已连接"
+          IMAGE_DIR=~/lineage-images
+          # 查找解压后的主镜像文件（通常为 .img 或 .qcow2）
+          MAIN_IMG=$(find $IMAGE_DIR -maxdepth 1 \( -name "*.img" -o -name "*.qcow2" \) | head -1)
+          echo "Using image: $MAIN_IMG"
 
-      - name: 配置 VNC + noVNC + Cloudflared 远程访问
+          # QEMU 参数说明：
+          # -M virt: 使用 virt 机器类型（通用 ARM64 虚拟机）
+          # -cpu max: 使用最大特性集的 CPU
+          # -m 4096: 分配 4GB 内存
+          # -smp 4: 分配 4 个 CPU 核心
+          # -nic user,hostfwd=tcp::5555-:5555: 将宿主机的 5555 端口转发到虚拟机的 5555（ADB）
+          # -vnc :0: 开启 VNC 服务，监听在本地 5900 端口
+          # -daemonize: 后台运行
+          qemu-system-aarch64 \
+            -M virt \
+            -cpu max \
+            -m 4096 \
+            -smp 4 \
+            -drive file=$MAIN_IMG,format=raw,if=virtio \
+            -nic user,hostfwd=tcp::5555-:5555 \
+            -vnc :0 \
+            -daemonize
+
+          echo "QEMU 已启动，等待 Android 系统初始化 (180s) ..."
+          sleep 180
+
+          # 检查 ADB 端口是否已监听
+          echo "宿主机端口监听状态："
+          sudo ss -tlnp | grep -E '5555|5900'
+
+      - name: 安装并启动 Cloudflared 隧道
         run: |
-          # scrcpy 生成 VNC
-          brew install scrcpy
-          scrcpy --vnc --vnc-addr=0.0.0.0:5900 --no-audio --no-window &
-          sleep 5
-          
-          # noVNC 网页桌面
-          brew install novnc
-          pip3 install websockify
-          websockify --web $(brew --prefix)/share/novnc 6080 localhost:5900 &
-          sleep 3
-          
-          # cloudflared 隧道
-          curl -L -o cloudflared.pkg https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-amd64.pkg
-          sudo installer -pkg cloudflared.pkg -target /
-          
-          cloudflared tunnel --url tcp://localhost:5555 > adb-tunnel.log 2>&1 &
-          cloudflared tunnel --url http://localhost:6080 > vnc-tunnel.log 2>&1 &
-          sleep 15
-          
+          # 下载 cloudflared（amd64 版本）
+          curl -L -o cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared.deb
+
+          # 启动 ADB 隧道（TCP）
+          nohup cloudflared tunnel --url tcp://localhost:5555 > adb-tunnel.log 2>&1 &
+          # 启动 VNC 隧道（TCP）
+          nohup cloudflared tunnel --url tcp://localhost:5900 > vnc-tunnel.log 2>&1 &
+
+          echo "等待 Cloudflared 建立隧道 (20s) ..."
+          sleep 20
+
+          # 提取公网域名
           ADB_HOST=$(grep -oP 'trycloudflare\.com\S+' adb-tunnel.log | head -1)
-          VNC_HOST=$(grep -oP '(?<=https://)[^ ]+\.trycloudflare\.com' vnc-tunnel.log | head -1)
-          
+          VNC_HOST=$(grep -oP 'trycloudflare\.com\S+' vnc-tunnel.log | head -1)
+
           echo "=========================================="
           if [ -n "$ADB_HOST" ]; then
-            echo "📱 ADB 连接: adb connect ${ADB_HOST}:443"
+            echo "📱 ADB 连接命令: adb connect ${ADB_HOST}:443"
           else
-            echo "❌ ADB 隧道失败，日志："; cat adb-tunnel.log
+            echo "❌ ADB 隧道失败，查看 adb-tunnel.log："
+            cat adb-tunnel.log
           fi
+
           if [ -n "$VNC_HOST" ]; then
-            echo "🌐 浏览器桌面: https://${VNC_HOST}"
+            echo "🖥️  VNC 连接地址: ${VNC_HOST}:443 (无密码)"
+            echo "   您可以使用 VNC 客户端连接，或通过 noVNC 网页代理访问。"
           else
-            echo "❌ 桌面隧道失败，日志："; cat vnc-tunnel.log
+            echo "❌ VNC 隧道失败，查看 vnc-tunnel.log："
+            cat vnc-tunnel.log
           fi
           echo "=========================================="
-          
+          echo "实例将保持运行 6 小时，请尽快使用。"
+
+          # 保持容器存活
           sleep 21600
