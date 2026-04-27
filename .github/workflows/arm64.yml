@@ -1,0 +1,184 @@
+name: Docker-Android 云手机 (支持 x86_64/arm64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      architecture:
+        description: 'CPU 架构'
+        required: true
+        type: choice
+        default: 'x86_64'
+        options:
+          - 'x86_64'
+          - 'arm64'
+      android_version:
+        description: 'Android 版本（仅 x86_64 可用）'
+        required: false
+        type: choice
+        default: '11.0'
+        options:
+          - '9.0'
+          - '10.0'
+          - '11.0'
+          - '12.0'
+          - '13.0'
+          - '14.0'
+      arm_api_level:
+        description: 'Android API 级别（仅 arm64）'
+        required: false
+        type: choice
+        default: '30'
+        options:
+          - '24'
+          - '25'
+          - '26'
+          - '27'
+          - '28'
+          - '29'
+          - '30'
+      device_model:
+        description: '手机型号（x86_64 有效）'
+        required: false
+        default: 'Samsung Galaxy S10'
+      arm_device_profile:
+        description: '设备配置（arm64）'
+        required: false
+        default: 'pixel_4'
+      screen_width:
+        description: '屏幕宽度 (px)'
+        required: false
+        default: '1080'
+      screen_height:
+        description: '屏幕高度 (px)'
+        required: false
+        default: '1920'
+      dpi:
+        description: '屏幕DPI (x86_64)'
+        required: false
+        default: '420'
+      enable_adb:
+        description: '开启 ADB 外部调试'
+        required: true
+        type: choice
+        default: 'true'
+        options:
+          - 'true'
+          - 'false'
+      enable_vnc:
+        description: '开启 Web VNC 远程桌面（arm64 默认开启）'
+        required: true
+        type: choice
+        default: 'true'
+        options:
+          - 'true'
+          - 'false'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 设置环境变量
+        run: |
+          echo "ARCH=${{ github.event.inputs.architecture }}" >> $GITHUB_ENV
+
+      # ========== x86_64 分支 ==========
+      - name: 启用 KVM（仅 x86_64）
+        if: env.ARCH == 'x86_64'
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger
+          sudo chmod 666 /dev/kvm
+
+      - name: 启动 Docker-Android（x86_64）
+        if: env.ARCH == 'x86_64'
+        run: |
+          PORTS="-p 6080:6080"
+          if [ "${{ github.event.inputs.enable_adb }}" == "true" ]; then
+            PORTS="$PORTS -p 5554:5554 -p 5555:5555"
+          fi
+          
+          docker run -d \
+            $PORTS \
+            -e EMULATOR_DEVICE="${{ github.event.inputs.device_model }}" \
+            -e WEB_VNC=true \
+            -e EMULATOR_ADDITIONAL_ARGS="-screen ${{ github.event.inputs.screen_width }}x${{ github.event.inputs.screen_height }} -dpi-device ${{ github.event.inputs.dpi }}" \
+            --device /dev/kvm \
+            --name android-container \
+            budtmo/docker-android:emulator_${{ github.event.inputs.android_version }}
+          
+          echo "等待模拟器初始化..."
+          sleep 30
+
+      # ========== arm64 分支 ==========
+      - name: 安装 arm64 模拟器依赖
+        if: env.ARCH == 'arm64'
+        run: |
+          sudo apt update
+          sudo apt install -y qemu-system-arm libgl1 libpulse0 libnss3 libasound2 libxcomposite1 libxdamage1 libxrandr2 libxcursor1 libxi6 libxtst6
+
+      - name: 配置 noVNC（arm64）
+        if: env.ARCH == 'arm64'
+        run: |
+          sudo apt install -y x11vnc xvfb novnc websockify
+          # 启动 Xvfb
+          export DISPLAY=:1
+          Xvfb :1 -screen 0 ${ARM_RESOLUTION:-1280x720x24} &
+          sleep 2
+          # 启动 x11vnc
+          x11vnc -display :1 -nopw -forever -quiet &
+          sleep 2
+          # 启动 websockify
+          websockify -D --web /usr/share/novnc 6080 localhost:5900
+          echo "noVNC 启动在 6080 端口"
+
+      - name: 运行 ARM64 模拟器（arm64）
+        if: env.ARCH == 'arm64'
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ github.event.inputs.arm_api_level }}
+          arch: arm64-v8a
+          target: google_apis
+          profile: ${{ github.event.inputs.arm_device_profile }}
+          disable-linux-hw-accel: true
+          emulator-options: >
+            -no-window
+            -gpu swiftshader_indirect
+            -noaudio
+            -no-boot-anim
+            -netdelay none
+            -netspeed full
+            -skin ${SCREEN_WIDTH}x${SCREEN_HEIGHT}
+          script: |
+            # 将 DISPLAY 设置指向 Xvfb
+            export DISPLAY=:1
+            # 等待设备启动
+            adb wait-for-device
+            # 可选：调整分辨率（如果命令支持）
+            adb shell wm size ${{ github.event.inputs.screen_width }}x${{ github.event.inputs.screen_height }}
+            # 保持容器存活，不结束脚本
+            sleep infinity
+
+      # ========== 隧道与输出（共通） ==========
+      - name: 安装并启动 Cloudflared 隧道
+        run: |
+          curl -L -o cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared.deb
+          nohup cloudflared tunnel --url http://localhost:6080 > cf.log 2>&1 &
+          sleep 15
+          CF_URL=$(grep -o 'https://[-a-zA-Z0-9]*\.trycloudflare\.com' cf.log | head -n 1)
+          echo "CF_URL=$CF_URL" >> $GITHUB_ENV
+
+      - name: 输出访问信息
+        run: |
+          echo "=========================================="
+          echo "架构: ${{ env.ARCH }}"
+          echo "✅ 部署成功！"
+          echo "🔗 公网桌面访问: ${{ env.CF_URL }}"
+          if [ "${{ github.event.inputs.enable_adb }}" == "true" ]; then
+            # 获取 Cloudflared 为 ADB 创建的隧道（如果需要额外隧道）
+            echo "📱 ADB 连接命令: adb connect localhost:5555 （需要通过另一个隧道映射 5555 端口）"
+          fi
+          echo "=========================================="
+          echo "容器将保持运行 6 小时"
+          sleep 21600
