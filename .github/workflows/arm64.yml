@@ -1,78 +1,104 @@
-name: ARM64 Android 云手机 (macOS + scrcpy + noVNC)
+name: ARM64 Android 云手机 (手动控制)
 
 on:
   workflow_dispatch:
 
 jobs:
   android:
-    runs-on: macos-14   # Apple Silicon，原生 ARM64，硬件加速
+    runs-on: macos-14
     timeout-minutes: 360
 
     steps:
-      - name: 启动 Android 模拟器 (ARM64)
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 34
-          arch: arm64-v8a
-          target: google_apis
-          profile: pixel_4
-          emulator-options: >-
-            -no-window
-            -gpu swiftshader_indirect
-            -no-audio
-            -no-boot-anim
-            -netdelay none
-            -netspeed full
-          script: |
-            echo "模拟器已启动，正在配置远程桌面..."
+      - name: 安装 Android SDK 和模拟器
+        run: |
+          # 设置 SDK 路径
+          export ANDROID_SDK_ROOT=$HOME/Library/Android/sdk
+          mkdir -p $ANDROID_SDK_ROOT/cmdline-tools
+          
+          # 下载最新命令行工具
+          curl -o cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-mac-11076708_latest.zip
+          unzip -q cmdline-tools.zip -d $ANDROID_SDK_ROOT/cmdline-tools
+          
+          # 移动到正确目录
+          mv $ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools $ANDROID_SDK_ROOT/cmdline-tools/latest
+          
+          # 添加环境变量
+          echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> $GITHUB_PATH
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
+          
+          # 同意许可
+          yes | sdkmanager --licenses
+          
+          # 安装系统镜像和模拟器
+          sdkmanager "system-images;android-34;google_apis;arm64-v8a" "platforms;android-34" "emulator" "platform-tools"
 
-            # 确保 ADB 设备已就绪
-            adb wait-for-device
-
-            # 1. 安装 scrcpy（自带 VNC 功能）
-            brew install scrcpy
-
-            # 2. 启动 scrcpy VNC 服务器（监听 5900 端口）
-            scrcpy --vnc --vnc-addr=0.0.0.0:5900 --no-audio --no-window &
+      - name: 创建 AVD 并启动模拟器
+        run: |
+          # 创建 AVD
+          echo "no" | avdmanager create avd -n test -k "system-images;android-34;google_apis;arm64-v8a" -d pixel_4
+          
+          # 启动模拟器（后台运行）
+          echo "启动模拟器..."
+          $ANDROID_SDK_ROOT/emulator/emulator -avd test -no-window -no-audio -no-boot-anim -netdelay none -netspeed full -gpu swiftshader_indirect -port 5554 &
+          
+          # 等待模拟器完全启动（最多等待 15 分钟）
+          echo "等待模拟器就绪..."
+          for i in {1..180}; do
+            if $ANDROID_SDK_ROOT/platform-tools/adb -s emulator-5554 shell getprop sys.boot_completed 2>/dev/null | grep -q '1'; then
+              echo "模拟器启动成功！"
+              break
+            fi
+            echo "等待中... ($i 次尝试)"
             sleep 5
+          done
+          
+          # 确保 boot completed 是 1
+          $ANDROID_SDK_ROOT/platform-tools/adb -s emulator-5554 wait-for-device
+          $ANDROID_SDK_ROOT/platform-tools/adb -s emulator-5554 shell getprop sys.boot_completed
 
-            # 3. 安装 noVNC + websockify
-            brew install novnc
-            pip3 install websockify
-
-            # 4. 启动 noVNC 代理（VNC 5900 → 浏览器 6080）
-            websockify --web /usr/local/share/novnc 6080 localhost:5900 &
-            sleep 3
-
-            # 5. 安装 cloudflared（用于公网隧道）
-            curl -L -o cloudflared.pkg https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-amd64.pkg
-            sudo installer -pkg cloudflared.pkg -target /
-
-            # 6. 启动两条隧道：
-            #    ADB 端口（5555）→ TCP 公网
-            #    noVNC 端口（6080）→ HTTP 公网
-            nohup cloudflared tunnel --url tcp://localhost:5555 > adb-tunnel.log 2>&1 &
-            nohup cloudflared tunnel --url http://localhost:6080 > vnc-tunnel.log 2>&1 &
-            sleep 15
-
-            # 7. 提取公网域名
-            ADB_HOST=$(grep -oP 'trycloudflare\.com\S+' adb-tunnel.log | head -1)
-            VNC_HOST=$(grep -oP '(?<=https://)[^ ]+\.trycloudflare\.com' vnc-tunnel.log | head -1)
-
-            echo "=========================================="
-            if [ -n "$ADB_HOST" ]; then
-              echo "📱 ADB 连接命令: adb connect ${ADB_HOST}:443"
-            else
-              echo "❌ ADB 隧道失败，请查看 adb-tunnel.log"
-            fi
-
-            if [ -n "$VNC_HOST" ]; then
-              echo "🌐 浏览器桌面地址: https://${VNC_HOST}"
-            else
-              echo "❌ VNC 隧道失败，请查看 vnc-tunnel.log"
-            fi
-            echo "=========================================="
-            echo "实例将保持运行 6 小时，请尽快使用。"
-
-            # 保持容器不退出
-            sleep 21600
+      - name: 配置 VNC + noVNC + Cloudflared 隧道
+        run: |
+          # 1. 安装 scrcpy（提供 VNC）
+          brew install scrcpy
+          # 启动 scrcpy VNC 服务器
+          scrcpy --vnc --vnc-addr=0.0.0.0:5900 --no-audio --no-window &
+          sleep 5
+          
+          # 2. 安装并启动 noVNC（网页桌面）
+          brew install novnc
+          pip3 install websockify
+          websockify --web /usr/local/share/novnc 6080 localhost:5900 &
+          sleep 3
+          
+          # 3. 安装 cloudflared
+          curl -L -o cloudflared.pkg https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-amd64.pkg
+          sudo installer -pkg cloudflared.pkg -target /
+          
+          # 4. 启动隧道（ADB 和 noVNC）
+          nohup cloudflared tunnel --url tcp://localhost:5555 > adb-tunnel.log 2>&1 &
+          nohup cloudflared tunnel --url http://localhost:6080 > vnc-tunnel.log 2>&1 &
+          sleep 15
+          
+          # 5. 提取公网地址
+          ADB_HOST=$(grep -oP 'trycloudflare\.com\S+' adb-tunnel.log | head -1)
+          VNC_HOST=$(grep -oP '(?<=https://)[^ ]+\.trycloudflare\.com' vnc-tunnel.log | head -1)
+          
+          # 输出连接信息到标准输出
+          echo "=========================================="
+          if [ -n "$ADB_HOST" ]; then
+            echo "📱 ADB 连接命令: adb connect ${ADB_HOST}:443"
+          else
+            echo "❌ ADB 隧道域名获取失败，查看 adb-tunnel.log"
+            cat adb-tunnel.log
+          fi
+          if [ -n "$VNC_HOST" ]; then
+            echo "🌐 浏览器桌面地址: https://${VNC_HOST}"
+          else
+            echo "❌ 浏览器桌面隧道失败，查看 vnc-tunnel.log"
+            cat vnc-tunnel.log
+          fi
+          echo "=========================================="
+          echo "实例将保持运行 6 小时，请尽快使用。"
+          
+          # 保持在线
+          sleep 21600
