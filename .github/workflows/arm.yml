@@ -18,38 +18,33 @@ jobs:
         run: |
           mkdir -p ~/lineage-images
           cd ~/lineage-images
-
-          # 下载主镜像压缩包
           wget -q https://github.com/jqssun/android-lineage-qemu/releases/download/v2026.03.18/UTM-VM-lineage-23.2-20260318-jqssun-virtio_arm64only.zip
           unzip -q UTM-VM-lineage-23.2-20260318-jqssun-virtio_arm64only.zip
           
-          # 列出解压后的文件（便于调试）
-          echo "解压后的文件列表："
+          echo "解压后的文件/目录："
           ls -1
 
-          # 选择主镜像（排除 recovery、boot，通常文件名包含 'lineage' 或 'virtio'）
-          # 这里手动指定已知的文件名，或者用逻辑：取最大的 .img 文件
-          MAIN_IMG=$(ls -1S *.img | grep -v -E 'recovery|boot' | head -1)
-          if [ -z "$MAIN_IMG" ]; then
-            # 如果没有 .img，尝试 .qcow2
-            MAIN_IMG=$(ls -1S *.qcow2 | head -1)
+          # 进入 UTM 包目录查找镜像（递归）
+          # 常见路径：LineageOS_on_arm64.utm/Images/disk.img 或 root.qcow2
+          IMAGE_DIR=$(find . -type d -name "Images" | head -1)
+          if [ -d "$IMAGE_DIR" ]; then
+            MAIN_IMG=$(find $IMAGE_DIR -type f \( -name "*.img" -o -name "*.qcow2" \) | head -1)
           fi
-          echo "MAIN_IMG=$MAIN_IMG" >> $GITHUB_ENV
-          echo "主镜像文件：$MAIN_IMG"
+          
+          if [ -z "$MAIN_IMG" ]; then
+            echo "❌ 未找到磁盘镜像，请检查包结构：" 
+            find . -type f
+            exit 1
+          fi
 
-          # 下载备用 boot 和 recovery（非必须）
-          wget -q https://github.com/jqssun/android-lineage-qemu/releases/download/v2026.03.18/boot.img
-          wget -q https://github.com/jqssun/android-lineage-qemu/releases/download/v2026.03.18/recovery-userdebug.img
+          echo "找到主镜像：$MAIN_IMG"
+          cp "$MAIN_IMG" system.img
+          echo "MAIN_IMG=system.img" >> $GITHUB_ENV
 
       - name: 启动 QEMU 虚拟机
         run: |
           cd ~/lineage-images
           echo "使用镜像：${{ env.MAIN_IMG }}"
-
-          # 赋予主镜像正确名称（避免文件名中有空格或特殊字符）
-          cp "${{ env.MAIN_IMG }}" system.img
-
-          # 启动 QEMU，使用用户模式网络，转发 ADB 5555，开启 VNC 5900
           qemu-system-aarch64 \
             -M virt \
             -cpu max \
@@ -62,8 +57,6 @@ jobs:
 
           echo "QEMU 已启动，等待系统初始化 (180s) ..."
           sleep 180
-
-          # 确认端口
           sudo ss -tlnp | grep -E '5555|5900'
 
       - name: 安装 cloudflared 并建立隧道
@@ -71,36 +64,30 @@ jobs:
           curl -L -o cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared.deb
 
-          # 启动隧道
           nohup cloudflared tunnel --url tcp://localhost:5555 > adb-tunnel.log 2>&1 &
           nohup cloudflared tunnel --url tcp://localhost:5900 > vnc-tunnel.log 2>&1 &
-
-          echo "等待隧道建立 (20s) ..."
           sleep 20
 
-          # 打印完整日志（便于排错）
-          echo "===== ADB 隧道日志 ====="
+          echo "===== 隧道日志 ====="
           cat adb-tunnel.log
-          echo "===== VNC 隧道日志 ====="
           cat vnc-tunnel.log
 
-          # 提取域名（完整子域名）
-          ADB_HOST=$(grep -oP 'trycloudflare\.com/[a-zA-Z0-9.-]+' adb-tunnel.log | head -1 | sed 's|trycloudflare\.com/||')
-          VNC_HOST=$(grep -oP 'trycloudflare\.com/[a-zA-Z0-9.-]+' vnc-tunnel.log | head -1 | sed 's|trycloudflare\.com/||')
+          # 提取完整域名（例如 https://xxxxx.trycloudflare.com）
+          ADB_HOST=$(grep -oP 'https?://\K[^\s]+\.trycloudflare\.com' adb-tunnel.log | head -1)
+          VNC_HOST=$(grep -oP 'https?://\K[^\s]+\.trycloudflare\.com' vnc-tunnel.log | head -1)
 
           if [ -n "$ADB_HOST" ]; then
             echo "📱 ADB 连接命令: adb connect ${ADB_HOST}:443"
           else
-            echo "❌ ADB 隧道域名提取失败，请查看上方日志。"
+            echo "❌ ADB 隧道域名提取失败"
           fi
 
           if [ -n "$VNC_HOST" ]; then
             echo "🖥️  VNC 连接地址: ${VNC_HOST}:443 (无密码)"
-            echo "   您可以使用 VNC 客户端连接，或稍后在浏览器中通过 noVNC 访问。"
           else
-            echo "❌ VNC 隧道域名提取失败，请查看上方日志。"
+            echo "❌ VNC 隧道域名提取失败"
           fi
 
           echo "=========================================="
-          echo "实例将保持运行 6 小时，请尽快使用。"
+          echo "实例保持运行 6 小时"
           sleep 21600
