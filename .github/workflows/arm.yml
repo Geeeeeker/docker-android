@@ -1,4 +1,4 @@
-name: QEMU LineageOS 云手机 (UEFI 原版引导)
+name: QEMU LineageOS 云手机 (Python 解包 boot + 直接内核引导)
 
 on:
   workflow_dispatch:
@@ -12,9 +12,9 @@ jobs:
       - name: 安装依赖
         run: |
           sudo apt update
-          sudo apt install -y qemu-system-arm qemu-utils unzip wget novnc python3-websockify qemu-efi-aarch64
+          sudo apt install -y qemu-system-arm qemu-utils unzip wget novnc python3-websockify qemu-efi-aarch64 python3
 
-      - name: 下载并准备镜像与 UEFI 变量文件
+      - name: 下载并解包 LineageOS 镜像
         run: |
           mkdir -p ~/lineage-images && cd ~/lineage-images
           wget -q https://github.com/jqssun/android-lineage-qemu/releases/download/v2026.03.18/UTM-VM-lineage-23.2-20260318-jqssun-virtio_arm64only.zip
@@ -23,17 +23,45 @@ jobs:
           cp $DATA_DIR/vda.qcow2 system.qcow2
           cp $DATA_DIR/vdb.qcow2 data.qcow2
           
-          # 扩展 UTM 原版 efivars 至 64MB
-          cp $DATA_DIR/efi_vars.fd my_vars.fd
-          truncate -s 64M my_vars.fd
-          chmod 666 my_vars.fd
+          # 下载 boot.img
+          wget -q https://github.com/jqssun/android-lineage-qemu/releases/download/v2026.03.18/boot.img
 
-          echo "文件就绪："
-          ls -lh system.qcow2 data.qcow2 my_vars.fd
+          # 使用 Python 内联解包 boot.img
+          python3 -c '
+          import struct, os
+          fn = "boot.img"
+          with open(fn, "rb") as f:
+              magic = f.read(8)
+              if magic.decode() != "ANDROID!":
+                  raise Exception("Not an Android boot image")
+              # Android boot image header (8 bytes magic + 56 bytes header)
+              header = struct.unpack("<IIIIIIIIIIIIII", f.read(56))
+              kernel_size = header[0]
+              ramdisk_size = header[2]
+              page_size = header[8]
+              cmdline = f.read(512)  # 命令行动态覆盖，这里不读取
+              f.seek(page_size)
+              kernel_data = f.read(kernel_size)
+              # 计算 ramdisk 位置
+              ramdisk_offset = ((kernel_size + page_size - 1) // page_size) * page_size
+              f.seek(page_size + ramdisk_offset)
+              ramdisk_data = f.read(ramdisk_size) if ramdisk_size else b""
+          with open("kernel", "wb") as kf:
+              kf.write(kernel_data)
+          with open("ramdisk.gz", "wb") as rf:
+              rf.write(ramdisk_data) if ramdisk_data else None
+          print("Extracted kernel and ramdisk.gz")
+                    '
 
-      - name: 启动 QEMU（UEFI 引导，无需指定内核）
+          echo "解包完成，列出文件："
+          ls -lh kernel ramdisk.gz system.qcow2 data.qcow2
+
+      - name: 启动 QEMU (直接内核引导)
         run: |
           cd ~/lineage-images
+          cp /usr/share/AAVMF/AAVMF_VARS.fd my_vars.fd
+          chmod 666 my_vars.fd
+
           qemu-system-aarch64 \
             -M virt \
             -cpu max \
@@ -41,14 +69,17 @@ jobs:
             -smp 4 \
             -drive if=pflash,format=raw,file=/usr/share/AAVMF/AAVMF_CODE.fd,readonly=on \
             -drive if=pflash,format=raw,file=my_vars.fd \
+            -kernel kernel \
+            -initrd ramdisk.gz \
+            -append "console=ttyAMA0 root=/dev/vda rw androidboot.slot_suffix= androidboot.hardware=virtio" \
             -drive file=system.qcow2,format=qcow2,if=virtio,index=0 \
             -drive file=data.qcow2,format=qcow2,if=virtio,index=1 \
             -nic user,hostfwd=tcp::5555-:5555 \
             -vnc :0 \
             -daemonize
 
-          echo "QEMU 已启动，等待系统启动 (120s)..."
-          sleep 120
+          echo "QEMU 已启动，等待系统启动 (180s)..."
+          sleep 60
 
       - name: 建立 noVNC 与隧道
         run: |
