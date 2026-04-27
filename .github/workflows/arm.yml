@@ -1,4 +1,4 @@
-name: QEMU LineageOS 云手机 (最终版)
+name: QEMU LineageOS 云手机 (直接内核引导)
 
 on:
   workflow_dispatch:
@@ -14,7 +14,7 @@ jobs:
           sudo apt update
           sudo apt install -y qemu-system-arm qemu-utils unzip wget novnc python3-websockify qemu-efi-aarch64
 
-      - name: 下载并准备 LineageOS 镜像
+      - name: 下载并准备镜像与内核文件
         run: |
           mkdir -p ~/lineage-images && cd ~/lineage-images
           wget -q https://github.com/jqssun/android-lineage-qemu/releases/download/v2026.03.18/UTM-VM-lineage-23.2-20260318-jqssun-virtio_arm64only.zip
@@ -22,15 +22,22 @@ jobs:
           DATA_DIR=$(find . -type d -name "Data" | head -1)
           cp $DATA_DIR/vda.qcow2 system.qcow2
           cp $DATA_DIR/vdb.qcow2 data.qcow2
-          echo "磁盘镜像已就绪"
-          ls -lh system.qcow2 data.qcow2
+          
+          # 下载内核 (boot.img) 和 recovery (作为initrd)
+          wget -q https://github.com/jqssun/android-lineage-qemu/releases/download/v2026.03.18/boot.img
+          wget -q https://github.com/jqssun/android-lineage-qemu/releases/download/v2026.03.18/recovery-userdebug.img
 
-      - name: 启动 QEMU（复制 UEFI 变量文件到工作目录）
+          echo "所有文件已就绪"
+          ls -lh system.qcow2 data.qcow2 boot.img recovery-userdebug.img
+
+      - name: 启动 QEMU（直接内核引导）
         run: |
           cd ~/lineage-images
-          # 复制 AAVMF_VARS.fd 到本地，赋予写权限
+          # 复制并设置UEFI变量文件权限
           cp /usr/share/AAVMF/AAVMF_VARS.fd my_vars.fd
           chmod 666 my_vars.fd
+          
+          # 使用 -kernel 和 -initrd 直接引导
           qemu-system-aarch64 \
             -M virt \
             -cpu max \
@@ -38,12 +45,16 @@ jobs:
             -smp 4 \
             -drive if=pflash,format=raw,file=/usr/share/AAVMF/AAVMF_CODE.fd,readonly=on \
             -drive if=pflash,format=raw,file=my_vars.fd \
+            -kernel boot.img \
+            -initrd recovery-userdebug.img \
+            -append "console=ttyAMA0 root=/dev/vda rw" \
             -drive file=system.qcow2,format=qcow2,if=virtio,index=0 \
             -drive file=data.qcow2,format=qcow2,if=virtio,index=1 \
             -nic user,hostfwd=tcp::5555-:5555 \
             -vnc :0 \
             -daemonize
-          echo "QEMU 已启动，等待 Android 启动（180s）..."
+          
+          echo "QEMU 已启动，等待系统启动 (180s)..."
           sleep 180
 
       - name: 建立 noVNC 与隧道
