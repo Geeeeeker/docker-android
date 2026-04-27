@@ -1,4 +1,4 @@
-name: QEMU LineageOS 云手机 (最终稳定版)
+name: QEMU LineageOS 云手机 (VNC + 浏览器桌面)
 
 on:
   workflow_dispatch:
@@ -12,25 +12,22 @@ jobs:
       - name: 安装依赖
         run: |
           sudo apt update
-          sudo apt install -y qemu-system-arm qemu-utils unzip wget
+          sudo apt install -y qemu-system-arm qemu-utils unzip wget novnc websockify python3-websockify
 
-      - name: 下载并解压 LineageOS 镜像
+      - name: 下载并准备 LineageOS 镜像
         run: |
-          mkdir -p ~/lineage-images
-          cd ~/lineage-images
+          mkdir -p ~/lineage-images && cd ~/lineage-images
           wget -q https://github.com/jqssun/android-lineage-qemu/releases/download/v2026.03.18/UTM-VM-lineage-23.2-20260318-jqssun-virtio_arm64only.zip
           unzip -q UTM-VM-lineage-23.2-20260318-jqssun-virtio_arm64only.zip
-
-          # 定位 Data 目录下的 qcow2
           DATA_DIR=$(find . -type d -name "Data" | head -1)
           VDA=$(find $DATA_DIR -type f -name "vda.qcow2" | head -1)
           VDB=$(find $DATA_DIR -type f -name "vdb.qcow2" | head -1)
           cp "$VDA" system.qcow2
           cp "$VDB" data.qcow2
-          echo "镜像已就绪："
+          echo "镜像就绪："
           ls -lh system.qcow2 data.qcow2
 
-      - name: 启动 QEMU
+      - name: 启动 QEMU (ADB 5555, VNC 5900)
         run: |
           cd ~/lineage-images
           qemu-system-aarch64 \
@@ -44,46 +41,29 @@ jobs:
           sleep 180
           sudo ss -tlnp | grep -E '5555|5900'
 
-      - name: 建立隧道 (Cloudflared / 备选 bore)
+      - name: 启动 noVNC 并建立隧道
         run: |
-          # 尝试 cloudflared
+          # noVNC 将 VNC 5900 转成 WebSocket 6080（HTTP 可浏览器打开）
+          websockify --web /usr/share/novnc 6080 localhost:5900 &
+
+          # 安装 cloudflared
           curl -L -o cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared.deb
 
-          # 启动 cloudflared 隧道脚本（并行）
-          cloudflared tunnel --url tcp://localhost:5555 > adb-cf.log 2>&1 &
-          cloudflared tunnel --url tcp://localhost:5900 > vnc-cf.log 2>&1 &
-          sleep 15
+          # ADB 隧道 (TCP)
+          nohup cloudflared tunnel --url tcp://localhost:5555 > adb-tunnel.log 2>&1 &
+          # noVNC 隧道 (HTTP，浏览器直接打开)
+          nohup cloudflared tunnel --url http://localhost:6080 > novnc-tunnel.log 2>&1 &
 
-          # 检查 cloudflared 是否成功
-          if grep -q "trycloudflare.com" adb-cf.log && grep -q "trycloudflare.com" vnc-cf.log; then
-            echo "✅ Cloudflared 隧道成功"
-            ADB_HOST=$(grep -oP 'https?://\K[^\s]+\.trycloudflare\.com' adb-cf.log | head -1)
-            VNC_HOST=$(grep -oP 'https?://\K[^\s]+\.trycloudflare\.com' vnc-cf.log | head -1)
-          else
-            echo "❌ Cloudflared 失败，切换到 bore (免注册)"
-            # 下载 bore
-            wget -q -O bore https://github.com/ekzhang/bore/releases/download/v0.5.2/bore-v0.5.2-x86_64-unknown-linux-musl.tar.gz
-            tar xzf bore
-            chmod +x bore
-            # 暴露 ADB 5555
-            nohup ./bore local 5555 --to bore.pub > bore-adb.log 2>&1 &
-            # 暴露 VNC 5900
-            nohup ./bore local 5900 --to bore.pub > bore-vnc.log 2>&1 &
-            sleep 10
-            # 提取 bore 地址 (格式：bore.pub:PORT)
-            ADB_HOST=$(grep -oP 'bore\.pub:\d+' bore-adb.log | head -1)
-            VNC_HOST=$(grep -oP 'bore\.pub:\d+' bore-vnc.log | head -1)
-          fi
+          sleep 20
+
+          # 提取域名
+          ADB_HOST=$(grep -oP 'https?://\K[^\s]+\.trycloudflare\.com' adb-tunnel.log | head -1)
+          NOVNC_HOST=$(grep -oP 'https?://\K[^\s]+\.trycloudflare\.com' novnc-tunnel.log | head -1)
 
           echo "=========================================="
-          echo "📱 ADB 连接: adb connect ${ADB_HOST}:443"  # cloudflared 用 443，bore 直接接端口
-          echo "🖥️  VNC 地址: ${VNC_HOST}:443   (无密码)"  # bore 的话端口会不同，可自行调整说明
+          echo "📱 ADB 连接：  adb connect ${ADB_HOST}:443"
+          echo "🌐 浏览器桌面： https://${NOVNC_HOST}"
           echo "=========================================="
-          # 若为 bore，则 ADB/VNC 直接是 bore.pub:xxxxx，不需要 :443
-          if [[ $ADB_HOST == *"bore.pub"* ]]; then
-            echo "📱 ADB 连接: adb connect ${ADB_HOST}"
-            echo "🖥️  VNC 地址: ${VNC_HOST} (无密码)"
-          fi
           echo "实例保持运行 6 小时"
           sleep 21600
