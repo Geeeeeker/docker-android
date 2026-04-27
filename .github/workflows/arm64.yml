@@ -1,59 +1,57 @@
-name: ARM64 Android Emulator (原生)
+name: QEMU-Android 云手机
 
 on:
   workflow_dispatch:
-    inputs:
-      api_level:
-        description: 'Android API 级别'
-        required: true
-        default: '30'
-        type: choice
-        options:
-          - '24'
-          - '25'
-          - '26'
-          - '27'
-          - '28'
-          - '29'
-          - '30'
-          - '31'
-          - '32'
-          - '33'
-          - '34'
-      device_profile:
-        description: '设备配置'
-        required: true
-        default: 'pixel_4'
-      screen_width:
-        description: '屏幕宽度 (px)'
-        required: false
-        default: '1080'
-      screen_height:
-        description: '屏幕高度 (px)'
-        required: false
-        default: '1920'
 
 jobs:
-  arm-emulator:
-    runs-on: ubuntu-24.04-arm   # 🌟 关键：使用 ARM64 硬件
+  android:
+    runs-on: ubuntu-latest
     steps:
-      - name: 运行 ARM64 模拟器
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: ${{ github.event.inputs.api_level }}
-          arch: arm64-v8a
-          target: google_apis
-          profile: ${{ github.event.inputs.device_profile }}
-          disable-linux-hw-accel: false   # ARM 主机通常支持 KVM
-          emulator-options: >
-            -no-window
-            -gpu swiftshader_indirect
-            -noaudio
-            -no-boot-anim
-            -netdelay none
-            -netspeed full
-            -skin ${{ github.event.inputs.screen_width }}x${{ github.event.inputs.screen_height }}
-          script: |
-            adb wait-for-device
-            adb shell getprop ro.product.cpu.abi
-            # 此处可以执行你需要的任何测试或命令
+      - name: 启用 KVM 并安装依赖
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger
+          sudo chmod 666 /dev/kvm
+
+      - name: 启动 Android 容器 (dock-droid)
+        run: |
+          docker run -d \
+            --name android-container \
+            --device /dev/kvm \
+            -p 5555:5555 \
+            -p 6080:6080 \
+            sickcodes/dock-droid:latest
+          
+          echo "Android 容器已启动，正在等待系统初始化..."
+          sleep 30
+
+      - name: 为 ADB 和 VNC 安装并启动 Cloudflared 隧道
+        run: |
+          # 安装 cloudflared
+          curl -L -o cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared.deb
+          
+          # 为 ADB 创建 TCP 隧道
+          nohup cloudflared tunnel --url tcp://localhost:5555 > cf-adb.log 2>&1 &
+          # 为 noVNC (Web桌面) 创建 HTTP 隧道
+          nohup cloudflared tunnel --url http://localhost:6080 > cf-vnc.log 2>&1 &
+          
+          sleep 15
+          
+          # 提取公网地址
+          ADB_URL=$(grep -o 'https://[-a-zA-Z0-9]*\.trycloudflare\.com' cf-adb.log | head -n 1)
+          VNC_URL=$(grep -o 'https://[-a-zA-Z0-9]*\.trycloudflare\.com' cf-vnc.log | head -n 1)
+          
+          echo "ADB_URL=$ADB_URL" >> $GITHUB_ENV
+          echo "VNC_URL=$VNC_URL" >> $GITHUB_ENV
+
+      - name: 输出访问信息
+        run: |
+          echo "=========================================="
+          echo "✅ Android 云手机就绪！"
+          echo "🔗 公网 VNC 桌面地址: ${{ env.VNC_URL }}"
+          echo "📱 ADB 连接方式: adb connect ${{ env.ADB_URL }}:443"
+          echo "=========================================="
+          echo "容器将保持运行 6 小时"
+          sleep 21600
