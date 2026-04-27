@@ -12,7 +12,8 @@ jobs:
       - name: 安装 QEMU 和依赖
         run: |
           brew install qemu
-          pip3 install websockify
+          # 使用 --break-system-packages 允许安装
+          pip3 install --break-system-packages websockify
           # 下载 noVNC 静态文件
           curl -L -o novnc.zip https://github.com/novnc/noVNC/archive/refs/tags/v1.4.0.zip
           unzip -q novnc.zip
