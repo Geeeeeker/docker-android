@@ -1,4 +1,4 @@
-name: QEMU LineageOS 云手机 (Magisk 解包 + DTB)
+name: QEMU LineageOS 云手机 (最终版)
 
 on:
   workflow_dispatch:
@@ -23,31 +23,21 @@ jobs:
           cp $DATA_DIR/vda.qcow2 system.qcow2
           cp $DATA_DIR/vdb.qcow2 data.qcow2
 
-          # 下载 boot.img
           wget -q https://github.com/jqssun/android-lineage-qemu/releases/download/v2026.03.18/boot.img
-
-          # 下载 MagiskBoot
           wget -q https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk
           unzip -j Magisk-v27.0.apk "lib/x86_64/libmagiskboot.so" -d .
           mv libmagiskboot.so magiskboot
           chmod +x magiskboot
 
-          # 解包 boot.img
           ./magiskboot unpack boot.img
-          # 输出文件: kernel, ramdisk.cpio (可能 lz4 压缩), kernel_dtb, ...
 
-          # 处理 ramdisk：如果为压缩格式，则解压为纯 cpio
-          if ./magiskboot decompress ramdisk.cpio ramdisk.img > /dev/null 2>&1; then
-            mv ramdisk.img ramdisk.cpio
-            echo "ramdisk 已解压"
-          else
-            echo "ramdisk 已是原始 cpio，无需解压"
-          fi
+          # ramdisk 无论是 lz4 还是 raw，统一用 gzip 压缩成 .gz（QEMU 最兼容）
+          gzip -c ramdisk.cpio > ramdisk.gz
 
-          echo "解包完成，文件列表："
-          ls -lh kernel ramdisk.cpio kernel_dtb system.qcow2 data.qcow2
+          echo "文件就绪："
+          ls -lh kernel ramdisk.gz system.qcow2 data.qcow2
 
-      - name: 启动 QEMU (带设备树)
+      - name: 启动 QEMU (无 DTB，gzip 内存盘)
         run: |
           cd ~/lineage-images
           cp /usr/share/AAVMF/AAVMF_VARS.fd my_vars.fd
@@ -61,8 +51,7 @@ jobs:
             -drive if=pflash,format=raw,file=/usr/share/AAVMF/AAVMF_CODE.fd,readonly=on \
             -drive if=pflash,format=raw,file=my_vars.fd \
             -kernel kernel \
-            -initrd ramdisk.cpio \
-            -dtb kernel_dtb \
+            -initrd ramdisk.gz \
             -append "console=ttyAMA0 androidboot.hardware=virtio androidboot.slot_suffix=" \
             -drive file=system.qcow2,format=qcow2,if=virtio,index=0 \
             -drive file=data.qcow2,format=qcow2,if=virtio,index=1 \
@@ -71,7 +60,7 @@ jobs:
             -daemonize
 
           echo "QEMU 已启动，等待系统启动 (180s)..."
-          sleep 180
+          sleep 30
 
       - name: 建立 noVNC 与隧道
         run: |
