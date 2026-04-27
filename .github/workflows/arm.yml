@@ -1,20 +1,20 @@
-name: QEMU LineageOS 云手机 (最终版)
+name: macOS ARM QEMU LineageOS (原生 ARM 加速)
 
 on:
   workflow_dispatch:
 
 jobs:
-  qemu-android:
-    runs-on: ubuntu-latest
+  android:
+    runs-on: macos-14          # Apple Silicon，原生 ARM64
     timeout-minutes: 360
 
     steps:
-      - name: 安装依赖
+      - name: 安装 QEMU 和依赖
         run: |
-          sudo apt update
-          sudo apt install -y qemu-system-arm qemu-utils unzip wget novnc python3-websockify qemu-efi-aarch64
+          brew install qemu novnc python3
+          pip3 install websockify
 
-      - name: 下载并解包镜像
+      - name: 下载并准备 LineageOS 镜像
         run: |
           mkdir -p ~/lineage-images && cd ~/lineage-images
           wget -q https://github.com/jqssun/android-lineage-qemu/releases/download/v2026.03.18/UTM-VM-lineage-23.2-20260318-jqssun-virtio_arm64only.zip
@@ -23,50 +23,40 @@ jobs:
           cp $DATA_DIR/vda.qcow2 system.qcow2
           cp $DATA_DIR/vdb.qcow2 data.qcow2
 
-          wget -q https://github.com/jqssun/android-lineage-qemu/releases/download/v2026.03.18/boot.img
-          wget -q https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk
-          unzip -j Magisk-v27.0.apk "lib/x86_64/libmagiskboot.so" -d .
-          mv libmagiskboot.so magiskboot
-          chmod +x magiskboot
+          # 复制 UEFI 变量文件并扩至 64MB
+          cp $DATA_DIR/efi_vars.fd my_vars.fd
+          truncate -s 64M my_vars.fd
 
-          ./magiskboot unpack boot.img
+          echo "镜像就绪："
+          ls -lh system.qcow2 data.qcow2 my_vars.fd
 
-          # ramdisk 无论是 lz4 还是 raw，统一用 gzip 压缩成 .gz（QEMU 最兼容）
-          gzip -c ramdisk.cpio > ramdisk.gz
-
-          echo "文件就绪："
-          ls -lh kernel ramdisk.gz system.qcow2 data.qcow2
-
-      - name: 启动 QEMU (无 DTB，gzip 内存盘)
+      - name: 启动 QEMU（HVF 加速 + UEFI 引导）
         run: |
           cd ~/lineage-images
-          cp /usr/share/AAVMF/AAVMF_VARS.fd my_vars.fd
-          chmod 666 my_vars.fd
-
           qemu-system-aarch64 \
-            -M virt \
-            -cpu max \
+            -M virt,accel=hvf \
+            -cpu host \
             -m 4096 \
             -smp 4 \
-            -drive if=pflash,format=raw,file=/usr/share/AAVMF/AAVMF_CODE.fd,readonly=on \
+            -drive if=pflash,format=raw,file=/opt/homebrew/share/qemu/edk2-aarch64-code.fd,readonly=on \
             -drive if=pflash,format=raw,file=my_vars.fd \
-            -kernel kernel \
-            -initrd ramdisk.gz \
-            -append "console=ttyAMA0 androidboot.hardware=virtio androidboot.slot_suffix=" \
             -drive file=system.qcow2,format=qcow2,if=virtio,index=0 \
             -drive file=data.qcow2,format=qcow2,if=virtio,index=1 \
             -nic user,hostfwd=tcp::5555-:5555 \
             -vnc :0 \
             -daemonize
 
-          echo "QEMU 已启动，等待系统启动 (180s)..."
-          sleep 30
+          echo "QEMU 已启动，等待系统启动 (120s)..."
+          sleep 120
 
       - name: 建立 noVNC 与隧道
         run: |
-          websockify --web /usr/share/novnc 6080 localhost:5900 &
-          curl -L -o cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-          sudo dpkg -i cloudflared.deb
+          # noVNC 将 VNC 转为浏览器可用
+          websockify --web $(brew --prefix)/share/novnc 6080 localhost:5900 &
+          # 安装 cloudflared
+          curl -L -o cloudflared.pkg https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-amd64.pkg
+          sudo installer -pkg cloudflared.pkg -target /
+          # 隧道
           nohup cloudflared tunnel --url tcp://localhost:5555 > adb-tunnel.log 2>&1 &
           nohup cloudflared tunnel --url http://localhost:6080 > novnc-tunnel.log 2>&1 &
           sleep 20
