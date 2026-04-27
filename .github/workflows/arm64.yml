@@ -1,4 +1,4 @@
-name: QEMU-Android 云手机
+name: QEMU-Android 云手机 (强化诊断)
 
 on:
   workflow_dispatch:
@@ -13,7 +13,7 @@ jobs:
           sudo udevadm control --reload-rules && sudo udevadm trigger
           sudo chmod 666 /dev/kvm
 
-      - name: 启动 Android 容器 (dock-droid, 无头 + VNC)
+      - name: 启动 Android 容器 (dock-droid)
         run: |
           docker run -d \
             --name android-container \
@@ -22,26 +22,77 @@ jobs:
             -p 5999:5999 \
             -e EXTRA="-display none -vnc 0.0.0.0:99" \
             sickcodes/dock-droid:latest
-          echo "等待系统初始化..."
-          sleep 60  # 给足时间让 Android 完全启动
+          
+          echo "等待容器完全初始化 (120s) ..."
+          sleep 120
 
-      - name: 启动隧道
+          # 1. 检查容器是否存活
+          echo "===== 容器状态 ====="
+          docker ps -a
+          
+          # 2. 确保 ADB 服务在容器内启动（dock-droid 有时不会自启）
+          echo "===== 启动容器内 ADB 服务 ====="
+          docker exec android-container adb start-server || true
+          docker exec android-container sh -c 'setprop persist.adb.tcp.port 5555 && start adbd' || true
+          sleep 5
+          
+          # 3. 查看端口监听情况（确认 5555 和 5999 是否真的打开）
+          echo "===== 宿主机端口监听 ====="
+          sudo ss -tlnp | grep -E '5555|5999'
+          
+          echo "===== 容器内端口监听 ====="
+          docker exec android-container ss -tlnp | grep -E '5555|99' || true
+
+      - name: 安装 cloudflared 并启动隧道
         run: |
           curl -L -o cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared.deb
-          nohup cloudflared tunnel --url tcp://localhost:5555 > cf-adb.log 2>&1 &
-          nohup cloudflared tunnel --url tcp://localhost:5999 > cf-vnc.log 2>&1 &
-          sleep 15
-          ADB_URL=$(grep -o 'https://[-a-zA-Z0-9]*\.trycloudflare\.com' cf-adb.log | head -n 1)
-          VNC_URL=$(grep -o 'https://[-a-zA-Z0-9]*\.trycloudflare\.com' cf-vnc.log | head -n 1)
-          echo "ADB_URL=$ADB_URL" >> $GITHUB_ENV
-          echo "VNC_URL=$VNC_URL" >> $GITHUB_ENV
+          
+          # 启动 ADB 隧道（TCP）
+          nohup cloudflared tunnel --url tcp://localhost:5555 --no-autoupdate > adb-tunnel.log 2>&1 &
+          # 启动 VNC 隧道（TCP）
+          nohup cloudflared tunnel --url tcp://localhost:5999 --no-autoupdate > vnc-tunnel.log 2>&1 &
+          
+          echo "等待隧道建立 (20s) ..."
+          sleep 20
+          
+          # 打印完整日志，便于调试
+          echo "===== ADB 隧道日志 ====="
+          cat adb-tunnel.log
+          echo "===== VNC 隧道日志 ====="
+          cat vnc-tunnel.log
+          
+          # 精确提取域名（兼容 tcp:// 和 https:// 输出）
+          ADB_HOST=$(grep -oP 'trycloudflare\.com\S+' adb-tunnel.log | head -1)
+          VNC_HOST=$(grep -oP 'trycloudflare\.com\S+' vnc-tunnel.log | head -1)
+          
+          if [ -z "$ADB_HOST" ]; then
+            echo "❌ 未提取到 ADB 隧道域名，请检查日志"
+          else
+            ADB_CONNECT="adb connect ${ADB_HOST}:443"
+            echo "ADB_CONNECT=${ADB_CONNECT}" >> $GITHUB_ENV
+          fi
+          
+          if [ -z "$VNC_HOST" ]; then
+            echo "❌ 未提取到 VNC 隧道域名，请检查日志"
+          else
+            VNC_CONNECT="${VNC_HOST}:443"
+            echo "VNC_CONNECT=${VNC_CONNECT}" >> $GITHUB_ENV
+          fi
 
-      - name: 输出连接信息
+      - name: 输出连接信息（并保持在线）
         run: |
           echo "=========================================="
-          echo "✅ Android 云手机就绪"
-          echo "📱 ADB: adb connect ${{ env.ADB_URL }}:443"
-          echo "🖥️  VNC: 用 VNC 客户端连接 ${{ env.VNC_URL }}:443 (无密码)"
+          if [ -n "$ADB_CONNECT" ]; then
+            echo "📱 ADB 连接命令: $ADB_CONNECT"
+          else
+            echo "📱 ADB 连接地址获取失败，请查看上方日志"
+          fi
+          if [ -n "$VNC_CONNECT" ]; then
+            echo "🖥️  VNC 连接地址: $VNC_CONNECT (无密码)"
+          else
+            echo "🖥️  VNC 连接地址获取失败，请查看上方日志"
+          fi
           echo "=========================================="
+          echo "容器将保持运行 6 小时，请尽快使用"
           sleep 21600
