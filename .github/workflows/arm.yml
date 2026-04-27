@@ -5,7 +5,7 @@ on:
 
 jobs:
   qemu-android:
-    runs-on: ubuntu-latest      # 使用 x86_64 主机，通过 QEMU 模拟 ARM64
+    runs-on: ubuntu-latest
     timeout-minutes: 360
 
     steps:
@@ -14,84 +14,93 @@ jobs:
           sudo apt update
           sudo apt install -y qemu-system-arm qemu-utils unzip wget
 
-      - name: 下载 LineageOS 镜像
+      - name: 下载并解压 LineageOS 镜像
         run: |
           mkdir -p ~/lineage-images
           cd ~/lineage-images
-          # 下载主镜像
+
+          # 下载主镜像压缩包
           wget -q https://github.com/jqssun/android-lineage-qemu/releases/download/v2026.03.18/UTM-VM-lineage-23.2-20260318-jqssun-virtio_arm64only.zip
           unzip -q UTM-VM-lineage-23.2-20260318-jqssun-virtio_arm64only.zip
-          # 下载 boot 和 recovery 镜像（可选，备用）
+          
+          # 列出解压后的文件（便于调试）
+          echo "解压后的文件列表："
+          ls -1
+
+          # 选择主镜像（排除 recovery、boot，通常文件名包含 'lineage' 或 'virtio'）
+          # 这里手动指定已知的文件名，或者用逻辑：取最大的 .img 文件
+          MAIN_IMG=$(ls -1S *.img | grep -v -E 'recovery|boot' | head -1)
+          if [ -z "$MAIN_IMG" ]; then
+            # 如果没有 .img，尝试 .qcow2
+            MAIN_IMG=$(ls -1S *.qcow2 | head -1)
+          fi
+          echo "MAIN_IMG=$MAIN_IMG" >> $GITHUB_ENV
+          echo "主镜像文件：$MAIN_IMG"
+
+          # 下载备用 boot 和 recovery（非必须）
           wget -q https://github.com/jqssun/android-lineage-qemu/releases/download/v2026.03.18/boot.img
           wget -q https://github.com/jqssun/android-lineage-qemu/releases/download/v2026.03.18/recovery-userdebug.img
 
       - name: 启动 QEMU 虚拟机
         run: |
-          IMAGE_DIR=~/lineage-images
-          # 查找解压后的主镜像文件（通常为 .img 或 .qcow2）
-          MAIN_IMG=$(find $IMAGE_DIR -maxdepth 1 \( -name "*.img" -o -name "*.qcow2" \) | head -1)
-          echo "Using image: $MAIN_IMG"
+          cd ~/lineage-images
+          echo "使用镜像：${{ env.MAIN_IMG }}"
 
-          # QEMU 参数说明：
-          # -M virt: 使用 virt 机器类型（通用 ARM64 虚拟机）
-          # -cpu max: 使用最大特性集的 CPU
-          # -m 4096: 分配 4GB 内存
-          # -smp 4: 分配 4 个 CPU 核心
-          # -nic user,hostfwd=tcp::5555-:5555: 将宿主机的 5555 端口转发到虚拟机的 5555（ADB）
-          # -vnc :0: 开启 VNC 服务，监听在本地 5900 端口
-          # -daemonize: 后台运行
+          # 赋予主镜像正确名称（避免文件名中有空格或特殊字符）
+          cp "${{ env.MAIN_IMG }}" system.img
+
+          # 启动 QEMU，使用用户模式网络，转发 ADB 5555，开启 VNC 5900
           qemu-system-aarch64 \
             -M virt \
             -cpu max \
             -m 4096 \
             -smp 4 \
-            -drive file=$MAIN_IMG,format=raw,if=virtio \
+            -drive file=system.img,format=raw,if=virtio \
             -nic user,hostfwd=tcp::5555-:5555 \
             -vnc :0 \
             -daemonize
 
-          echo "QEMU 已启动，等待 Android 系统初始化 (180s) ..."
+          echo "QEMU 已启动，等待系统初始化 (180s) ..."
           sleep 180
 
-          # 检查 ADB 端口是否已监听
-          echo "宿主机端口监听状态："
+          # 确认端口
           sudo ss -tlnp | grep -E '5555|5900'
 
-      - name: 安装并启动 Cloudflared 隧道
+      - name: 安装 cloudflared 并建立隧道
         run: |
-          # 下载 cloudflared（amd64 版本）
           curl -L -o cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared.deb
 
-          # 启动 ADB 隧道（TCP）
+          # 启动隧道
           nohup cloudflared tunnel --url tcp://localhost:5555 > adb-tunnel.log 2>&1 &
-          # 启动 VNC 隧道（TCP）
           nohup cloudflared tunnel --url tcp://localhost:5900 > vnc-tunnel.log 2>&1 &
 
-          echo "等待 Cloudflared 建立隧道 (20s) ..."
+          echo "等待隧道建立 (20s) ..."
           sleep 20
 
-          # 提取公网域名
-          ADB_HOST=$(grep -oP 'trycloudflare\.com\S+' adb-tunnel.log | head -1)
-          VNC_HOST=$(grep -oP 'trycloudflare\.com\S+' vnc-tunnel.log | head -1)
+          # 打印完整日志（便于排错）
+          echo "===== ADB 隧道日志 ====="
+          cat adb-tunnel.log
+          echo "===== VNC 隧道日志 ====="
+          cat vnc-tunnel.log
 
-          echo "=========================================="
+          # 提取域名（完整子域名）
+          ADB_HOST=$(grep -oP 'trycloudflare\.com/[a-zA-Z0-9.-]+' adb-tunnel.log | head -1 | sed 's|trycloudflare\.com/||')
+          VNC_HOST=$(grep -oP 'trycloudflare\.com/[a-zA-Z0-9.-]+' vnc-tunnel.log | head -1 | sed 's|trycloudflare\.com/||')
+
           if [ -n "$ADB_HOST" ]; then
             echo "📱 ADB 连接命令: adb connect ${ADB_HOST}:443"
           else
-            echo "❌ ADB 隧道失败，查看 adb-tunnel.log："
-            cat adb-tunnel.log
+            echo "❌ ADB 隧道域名提取失败，请查看上方日志。"
           fi
 
           if [ -n "$VNC_HOST" ]; then
             echo "🖥️  VNC 连接地址: ${VNC_HOST}:443 (无密码)"
-            echo "   您可以使用 VNC 客户端连接，或通过 noVNC 网页代理访问。"
+            echo "   您可以使用 VNC 客户端连接，或稍后在浏览器中通过 noVNC 访问。"
           else
-            echo "❌ VNC 隧道失败，查看 vnc-tunnel.log："
-            cat vnc-tunnel.log
+            echo "❌ VNC 隧道域名提取失败，请查看上方日志。"
           fi
+
           echo "=========================================="
           echo "实例将保持运行 6 小时，请尽快使用。"
-
-          # 保持容器存活
           sleep 21600
