@@ -1,4 +1,4 @@
-name: QEMU LineageOS 云手机 (abootimg 解包)
+name: QEMU LineageOS 云手机 (recovery 引导)
 
 on:
   workflow_dispatch:
@@ -9,36 +9,34 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: 安装依赖 (含 abootimg)
+      - name: 安装依赖
         run: |
           sudo apt update
-          sudo apt install -y qemu-system-arm qemu-utils unzip wget novnc python3-websockify qemu-efi-aarch64 abootimg
+          sudo apt install -y qemu-system-arm qemu-utils unzip wget novnc python3-websockify qemu-efi-aarch64
 
-      - name: 下载并准备 LineageOS 镜像
+      - name: 下载并准备镜像
         run: |
           mkdir -p ~/lineage-images && cd ~/lineage-images
+          # 下载主镜像包
           wget -q https://github.com/jqssun/android-lineage-qemu/releases/download/v2026.03.18/UTM-VM-lineage-23.2-20260318-jqssun-virtio_arm64only.zip
           unzip -q UTM-VM-lineage-23.2-20260318-jqssun-virtio_arm64only.zip
           DATA_DIR=$(find . -type d -name "Data" | head -1)
           cp $DATA_DIR/vda.qcow2 system.qcow2
           cp $DATA_DIR/vdb.qcow2 data.qcow2
 
-          wget -q https://github.com/jqssun/android-lineage-qemu/releases/download/v2026.03.18/boot.img
-          
-          # 使用 abootimg 解包 boot.img
-          abootimg -x boot.img
-          mv boot.img-kernel kernel
-          mv boot.img-ramdisk.gz ramdisk.gz
-          
-          echo "解包完成："
-          ls -lh kernel ramdisk.gz system.qcow2 data.qcow2
+          # 下载 recovery-userdebug.img（可直接启动）
+          wget -q https://github.com/jqssun/android-lineage-qemu/releases/download/v2026.03.18/recovery-userdebug.img
 
-      - name: 启动 QEMU (直接内核引导)
+          echo "文件就绪："
+          ls -lh system.qcow2 data.qcow2 recovery-userdebug.img
+
+      - name: 启动 QEMU（使用 recovery-userdebug.img 作为内核）
         run: |
           cd ~/lineage-images
           cp /usr/share/AAVMF/AAVMF_VARS.fd my_vars.fd
           chmod 666 my_vars.fd
 
+          # 直接用 recovery-userdebug.img 作为 -kernel，QEMU 能识别 Android boot image
           qemu-system-aarch64 \
             -M virt \
             -cpu max \
@@ -46,9 +44,8 @@ jobs:
             -smp 4 \
             -drive if=pflash,format=raw,file=/usr/share/AAVMF/AAVMF_CODE.fd,readonly=on \
             -drive if=pflash,format=raw,file=my_vars.fd \
-            -kernel kernel \
-            -initrd ramdisk.gz \
-            -append "console=ttyAMA0 root=/dev/vda rw androidboot.slot_suffix= androidboot.hardware=virtio" \
+            -kernel recovery-userdebug.img \
+            -append "console=ttyAMA0 root=/dev/vda rw androidboot.force_normal_boot=1 androidboot.hardware=virtio" \
             -drive file=system.qcow2,format=qcow2,if=virtio,index=0 \
             -drive file=data.qcow2,format=qcow2,if=virtio,index=1 \
             -nic user,hostfwd=tcp::5555-:5555 \
