@@ -1,4 +1,4 @@
-name: QEMU LineageOS 云手机 (拆解 boot + 清槽位)
+name: QEMU LineageOS 云手机 (abootimg 解包)
 
 on:
   workflow_dispatch:
@@ -9,12 +9,10 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: 安装依赖 (含 boot 拆包工具)
+      - name: 安装依赖 (含 abootimg)
         run: |
           sudo apt update
-          sudo apt install -y qemu-system-arm qemu-utils unzip wget novnc python3-websockify qemu-efi-aarch64
-          # 安装 unpack_bootimg (Python 工具)
-          pip install unpack-bootimg
+          sudo apt install -y qemu-system-arm qemu-utils unzip wget novnc python3-websockify qemu-efi-aarch64 abootimg
 
       - name: 下载并准备 LineageOS 镜像
         run: |
@@ -25,13 +23,15 @@ jobs:
           cp $DATA_DIR/vda.qcow2 system.qcow2
           cp $DATA_DIR/vdb.qcow2 data.qcow2
 
-          # 下载 boot 与 recovery
           wget -q https://github.com/jqssun/android-lineage-qemu/releases/download/v2026.03.18/boot.img
-          wget -q https://github.com/jqssun/android-lineage-qemu/releases/download/v2026.03.18/recovery-userdebug.img
-
-          # 拆开 boot.img，得到 kernel, ramdisk, dtb
-          unpack_bootimg --boot_img boot.img --out boot_parts
-          ls -lh boot_parts/
+          
+          # 使用 abootimg 解包 boot.img
+          abootimg -x boot.img
+          mv boot.img-kernel kernel
+          mv boot.img-ramdisk.gz ramdisk.gz
+          
+          echo "解包完成："
+          ls -lh kernel ramdisk.gz system.qcow2 data.qcow2
 
       - name: 启动 QEMU (直接内核引导)
         run: |
@@ -46,8 +46,8 @@ jobs:
             -smp 4 \
             -drive if=pflash,format=raw,file=/usr/share/AAVMF/AAVMF_CODE.fd,readonly=on \
             -drive if=pflash,format=raw,file=my_vars.fd \
-            -kernel boot_parts/kernel \
-            -initrd boot_parts/ramdisk \
+            -kernel kernel \
+            -initrd ramdisk.gz \
             -append "console=ttyAMA0 root=/dev/vda rw androidboot.slot_suffix= androidboot.hardware=virtio" \
             -drive file=system.qcow2,format=qcow2,if=virtio,index=0 \
             -drive file=data.qcow2,format=qcow2,if=virtio,index=1 \
