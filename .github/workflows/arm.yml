@@ -5,14 +5,19 @@ on:
 
 jobs:
   android:
-    runs-on: macos-14          # Apple Silicon，原生 ARM64
+    runs-on: macos-14
     timeout-minutes: 360
 
     steps:
       - name: 安装 QEMU 和依赖
         run: |
-          brew install qemu novnc python3
+          brew install qemu
           pip3 install websockify
+          # 下载 noVNC 静态文件
+          curl -L -o novnc.zip https://github.com/novnc/noVNC/archive/refs/tags/v1.4.0.zip
+          unzip -q novnc.zip
+          mv noVNC-1.4.0 novnc
+          echo "noVNC 已就绪"
 
       - name: 下载并准备 LineageOS 镜像
         run: |
@@ -22,19 +27,16 @@ jobs:
           DATA_DIR=$(find . -type d -name "Data" | head -1)
           cp $DATA_DIR/vda.qcow2 system.qcow2
           cp $DATA_DIR/vdb.qcow2 data.qcow2
-
-          # 复制 UEFI 变量文件并扩至 64MB
           cp $DATA_DIR/efi_vars.fd my_vars.fd
           truncate -s 64M my_vars.fd
-
-          echo "镜像就绪："
+          echo "镜像就绪"
           ls -lh system.qcow2 data.qcow2 my_vars.fd
 
       - name: 启动 QEMU（HVF 加速 + UEFI 引导）
         run: |
           cd ~/lineage-images
           qemu-system-aarch64 \
-            -M virt,accel=hvf \
+            -M virt -accel hvf \
             -cpu host \
             -m 4096 \
             -smp 4 \
@@ -45,18 +47,14 @@ jobs:
             -nic user,hostfwd=tcp::5555-:5555 \
             -vnc :0 \
             -daemonize
-
-          echo "QEMU 已启动，等待系统启动 (120s)..."
-          sleep 120
+          echo "QEMU 已启动，等待系统启动 (180s)..."
+          sleep 180
 
       - name: 建立 noVNC 与隧道
         run: |
-          # noVNC 将 VNC 转为浏览器可用
-          websockify --web $(brew --prefix)/share/novnc 6080 localhost:5900 &
-          # 安装 cloudflared
+          websockify --web novnc 6080 localhost:5900 &
           curl -L -o cloudflared.pkg https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-amd64.pkg
           sudo installer -pkg cloudflared.pkg -target /
-          # 隧道
           nohup cloudflared tunnel --url tcp://localhost:5555 > adb-tunnel.log 2>&1 &
           nohup cloudflared tunnel --url http://localhost:6080 > novnc-tunnel.log 2>&1 &
           sleep 20
