@@ -7,51 +7,41 @@ jobs:
   android:
     runs-on: ubuntu-latest
     steps:
-      - name: 启用 KVM 并安装依赖
+      - name: 启用 KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666"' | sudo tee /etc/udev/rules.d/99-kvm.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger
+          sudo udevadm control --reload-rules && sudo udevadm trigger
           sudo chmod 666 /dev/kvm
 
-      - name: 启动 Android 容器 (dock-droid)
+      - name: 启动 Android 容器 (dock-droid, 无头 + VNC)
         run: |
           docker run -d \
             --name android-container \
             --device /dev/kvm \
             -p 5555:5555 \
-            -p 6080:6080 \
+            -p 5999:5999 \
+            -e EXTRA="-display none -vnc 0.0.0.0:99" \
             sickcodes/dock-droid:latest
-          
-          echo "Android 容器已启动，正在等待系统初始化..."
-          sleep 30
+          echo "等待系统初始化..."
+          sleep 60  # 给足时间让 Android 完全启动
 
-      - name: 为 ADB 和 VNC 安装并启动 Cloudflared 隧道
+      - name: 启动隧道
         run: |
-          # 安装 cloudflared
           curl -L -o cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared.deb
-          
-          # 为 ADB 创建 TCP 隧道
           nohup cloudflared tunnel --url tcp://localhost:5555 > cf-adb.log 2>&1 &
-          # 为 noVNC (Web桌面) 创建 HTTP 隧道
-          nohup cloudflared tunnel --url http://localhost:6080 > cf-vnc.log 2>&1 &
-          
+          nohup cloudflared tunnel --url tcp://localhost:5999 > cf-vnc.log 2>&1 &
           sleep 15
-          
-          # 提取公网地址
           ADB_URL=$(grep -o 'https://[-a-zA-Z0-9]*\.trycloudflare\.com' cf-adb.log | head -n 1)
           VNC_URL=$(grep -o 'https://[-a-zA-Z0-9]*\.trycloudflare\.com' cf-vnc.log | head -n 1)
-          
           echo "ADB_URL=$ADB_URL" >> $GITHUB_ENV
           echo "VNC_URL=$VNC_URL" >> $GITHUB_ENV
 
-      - name: 输出访问信息
+      - name: 输出连接信息
         run: |
           echo "=========================================="
-          echo "✅ Android 云手机就绪！"
-          echo "🔗 公网 VNC 桌面地址: ${{ env.VNC_URL }}"
-          echo "📱 ADB 连接方式: adb connect ${{ env.ADB_URL }}:443"
+          echo "✅ Android 云手机就绪"
+          echo "📱 ADB: adb connect ${{ env.ADB_URL }}:443"
+          echo "🖥️  VNC: 用 VNC 客户端连接 ${{ env.VNC_URL }}:443 (无密码)"
           echo "=========================================="
-          echo "容器将保持运行 6 小时"
           sleep 21600
