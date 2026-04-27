@@ -1,4 +1,4 @@
-name: QEMU LineageOS 云手机 (ARM64 + VNC + ADB)
+name: QEMU LineageOS 云手机 (修复镜像路径)
 
 on:
   workflow_dispatch:
@@ -21,42 +21,50 @@ jobs:
           wget -q https://github.com/jqssun/android-lineage-qemu/releases/download/v2026.03.18/UTM-VM-lineage-23.2-20260318-jqssun-virtio_arm64only.zip
           unzip -q UTM-VM-lineage-23.2-20260318-jqssun-virtio_arm64only.zip
           
-          echo "解压后的文件/目录："
-          ls -1
+          echo "解压后的文件列表："
+          find . -type f
 
-          # 进入 UTM 包目录查找镜像（递归）
-          # 常见路径：LineageOS_on_arm64.utm/Images/disk.img 或 root.qcow2
-          IMAGE_DIR=$(find . -type d -name "Images" | head -1)
-          if [ -d "$IMAGE_DIR" ]; then
-            MAIN_IMG=$(find $IMAGE_DIR -type f \( -name "*.img" -o -name "*.qcow2" \) | head -1)
-          fi
-          
-          if [ -z "$MAIN_IMG" ]; then
-            echo "❌ 未找到磁盘镜像，请检查包结构：" 
-            find . -type f
+          # 定位 Data 目录下的 qcow2 镜像
+          DATA_DIR=$(find . -type d -name "Data" | head -1)
+          if [ -z "$DATA_DIR" ]; then
+            echo "❌ 未找到 Data 目录"
             exit 1
           fi
 
-          echo "找到主镜像：$MAIN_IMG"
-          cp "$MAIN_IMG" system.img
-          echo "MAIN_IMG=system.img" >> $GITHUB_ENV
+          VDA=$(find $DATA_DIR -type f -name "vda.qcow2" | head -1)
+          VDB=$(find $DATA_DIR -type f -name "vdb.qcow2" | head -1)
+          
+          if [ -z "$VDA" ]; then
+            echo "❌ 未找到 vda.qcow2"
+            exit 1
+          fi
+
+          cp "$VDA" system.qcow2
+          cp "$VDB" data.qcow2
+          
+          echo "VDA=$(realpath system.qcow2)" >> $GITHUB_ENV
+          echo "VDB=$(realpath data.qcow2)" >> $GITHUB_ENV
+          
+          echo "镜像已就绪："
+          ls -lh system.qcow2 data.qcow2
 
       - name: 启动 QEMU 虚拟机
         run: |
-          cd ~/lineage-images
-          echo "使用镜像：${{ env.MAIN_IMG }}"
           qemu-system-aarch64 \
             -M virt \
             -cpu max \
             -m 4096 \
             -smp 4 \
-            -drive file=system.img,format=raw,if=virtio \
+            -drive file=system.qcow2,format=qcow2,if=virtio,index=0 \
+            -drive file=data.qcow2,format=qcow2,if=virtio,index=1 \
             -nic user,hostfwd=tcp::5555-:5555 \
             -vnc :0 \
             -daemonize
 
           echo "QEMU 已启动，等待系统初始化 (180s) ..."
           sleep 180
+          
+          # 确认端口
           sudo ss -tlnp | grep -E '5555|5900'
 
       - name: 安装 cloudflared 并建立隧道
@@ -68,24 +76,25 @@ jobs:
           nohup cloudflared tunnel --url tcp://localhost:5900 > vnc-tunnel.log 2>&1 &
           sleep 20
 
-          echo "===== 隧道日志 ====="
+          echo "===== ADB 隧道日志 ====="
           cat adb-tunnel.log
+          echo "===== VNC 隧道日志 ====="
           cat vnc-tunnel.log
 
-          # 提取完整域名（例如 https://xxxxx.trycloudflare.com）
+          # 提取完整域名
           ADB_HOST=$(grep -oP 'https?://\K[^\s]+\.trycloudflare\.com' adb-tunnel.log | head -1)
           VNC_HOST=$(grep -oP 'https?://\K[^\s]+\.trycloudflare\.com' vnc-tunnel.log | head -1)
 
           if [ -n "$ADB_HOST" ]; then
-            echo "📱 ADB 连接命令: adb connect ${ADB_HOST}:443"
+            echo "📱 ADB 连接: adb connect ${ADB_HOST}:443"
           else
-            echo "❌ ADB 隧道域名提取失败"
+            echo "❌ ADB 隧道域名未找到"
           fi
 
           if [ -n "$VNC_HOST" ]; then
-            echo "🖥️  VNC 连接地址: ${VNC_HOST}:443 (无密码)"
+            echo "🖥️  VNC 地址: ${VNC_HOST}:443 (无密码)"
           else
-            echo "❌ VNC 隧道域名提取失败"
+            echo "❌ VNC 隧道域名未找到"
           fi
 
           echo "=========================================="
