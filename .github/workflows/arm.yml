@@ -1,61 +1,53 @@
-name: ARM64 Android 云手机 (完全手动)
+name: ARM64 Android 云手机 (macOS 稳定版)
 
 on:
   workflow_dispatch:
 
 jobs:
   android:
-    runs-on: ubuntu-22.04-arm
+    runs-on: macos-14        # Apple Silicon, emulator 二进制可用
     timeout-minutes: 360
 
     steps:
-      - name: 安装 Java 与依赖
+      - name: 安装 Java
         run: |
-          sudo apt update
-          sudo apt install -y openjdk-17-jdk wget unzip
-          echo "JAVA_HOME=/usr/lib/jvm/java-17-openjdk-arm64" >> $GITHUB_ENV
+          brew install openjdk@17
+          sudo ln -sfn $(brew --prefix)/opt/openjdk@17/libexec/openjdk.jdk /Library/Java/JavaVirtualMachines/openjdk-17.jdk
+          echo "JAVA_HOME=$(brew --prefix)/opt/openjdk@17" >> $GITHUB_ENV
           echo "$JAVA_HOME/bin" >> $GITHUB_PATH
 
       - name: 安装 Android SDK
         run: |
           export ANDROID_SDK_ROOT=$HOME/android-sdk
           mkdir -p $ANDROID_SDK_ROOT/cmdline-tools
-          
-          # 下载命令行工具
-          curl -o cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          curl -o cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-mac-11076708_latest.zip
           unzip -q cmdline-tools.zip -d $ANDROID_SDK_ROOT/cmdline-tools
           mv $ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools $ANDROID_SDK_ROOT/cmdline-tools/latest
-          
-          # 写入环境
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
           export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$PATH"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
           echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> $GITHUB_PATH
           
-          # 同意许可
           yes | sdkmanager --licenses
-          
-          # 安装平台、镜像、模拟器（注意不加 --channel）
           sdkmanager "platforms;android-34" "system-images;android-34;google_apis;arm64-v8a" "emulator" "platform-tools"
           
-          # 将工具目录加入 PATH
           echo "$ANDROID_SDK_ROOT/emulator" >> $GITHUB_PATH
           echo "$ANDROID_SDK_ROOT/platform-tools" >> $GITHUB_PATH
 
-      - name: 创建 AVD 并启动模拟器
+      - name: 创建 AVD 并启动模拟器 (关闭硬件加速)
         run: |
           echo "no" | avdmanager create avd -n test -k "system-images;android-34;google_apis;arm64-v8a" -d pixel_4
           
-          echo "启动模拟器 (后台运行)..."
+          echo "启动模拟器 (纯软件模拟)..."
           $ANDROID_SDK_ROOT/emulator/emulator -avd test \
             -no-window -no-audio -no-boot-anim \
             -netdelay none -netspeed full \
             -gpu swiftshader_indirect \
+            -accel off \                # 关键：强制关闭硬件加速，避免 HVF 错误
             -port 5554 &
           
-          # 等待启动（最多 20 分钟）
-          for i in {1..240}; do
+          for i in {1..360}; do
             if $ANDROID_SDK_ROOT/platform-tools/adb -s emulator-5554 shell getprop sys.boot_completed 2>/dev/null | grep -q '1'; then
-              echo "模拟器完全启动！"
+              echo "模拟器启动成功！"
               break
             fi
             echo "等待中... ($i 次尝试)"
@@ -63,46 +55,43 @@ jobs:
           done
           
           $ANDROID_SDK_ROOT/platform-tools/adb -s emulator-5554 wait-for-device
-          echo "ADB 已就绪"
+          echo "ADB 已连接"
 
-      - name: 配置 VNC + noVNC + Cloudflared 隧道
+      - name: 配置 VNC + noVNC + Cloudflared 远程访问
         run: |
-          # 1. scrcpy 提供 VNC
-          sudo apt install -y scrcpy
+          # scrcpy 生成 VNC
+          brew install scrcpy
           scrcpy --vnc --vnc-addr=0.0.0.0:5900 --no-audio --no-window &
           sleep 5
           
-          # 2. noVNC 网页桌面
-          sudo apt install -y novnc python3-websockify
-          websockify --web /usr/share/novnc 6080 localhost:5900 &
+          # noVNC 网页桌面
+          brew install novnc
+          pip3 install websockify
+          websockify --web $(brew --prefix)/share/novnc 6080 localhost:5900 &
           sleep 3
           
-          # 3. cloudflared ARM64
-          curl -L -o cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64
-          chmod +x cloudflared
-          sudo mv cloudflared /usr/local/bin/
+          # cloudflared 隧道
+          curl -L -o cloudflared.pkg https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-amd64.pkg
+          sudo installer -pkg cloudflared.pkg -target /
           
-          # 4. 两条隧道
           cloudflared tunnel --url tcp://localhost:5555 > adb-tunnel.log 2>&1 &
           cloudflared tunnel --url http://localhost:6080 > vnc-tunnel.log 2>&1 &
           sleep 15
           
-          # 5. 提取域名
           ADB_HOST=$(grep -oP 'trycloudflare\.com\S+' adb-tunnel.log | head -1)
           VNC_HOST=$(grep -oP '(?<=https://)[^ ]+\.trycloudflare\.com' vnc-tunnel.log | head -1)
           
           echo "=========================================="
           if [ -n "$ADB_HOST" ]; then
-            echo "📱 ADB: adb connect ${ADB_HOST}:443"
+            echo "📱 ADB 连接: adb connect ${ADB_HOST}:443"
           else
-            echo "❌ ADB 隧道失败，查看日志："; cat adb-tunnel.log
+            echo "❌ ADB 隧道失败，日志："; cat adb-tunnel.log
           fi
           if [ -n "$VNC_HOST" ]; then
-            echo "🌐 桌面: https://${VNC_HOST}"
+            echo "🌐 浏览器桌面: https://${VNC_HOST}"
           else
-            echo "❌ 桌面隧道失败，查看日志："; cat vnc-tunnel.log
+            echo "❌ 桌面隧道失败，日志："; cat vnc-tunnel.log
           fi
           echo "=========================================="
           
-          # 保持 6 小时
           sleep 21600
