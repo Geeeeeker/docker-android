@@ -1,4 +1,4 @@
-name: QEMU LineageOS 云手机 (recovery 引导)
+name: QEMU LineageOS 云手机 (UEFI 原版引导)
 
 on:
   workflow_dispatch:
@@ -14,29 +14,26 @@ jobs:
           sudo apt update
           sudo apt install -y qemu-system-arm qemu-utils unzip wget novnc python3-websockify qemu-efi-aarch64
 
-      - name: 下载并准备镜像
+      - name: 下载并准备镜像与 UEFI 变量文件
         run: |
           mkdir -p ~/lineage-images && cd ~/lineage-images
-          # 下载主镜像包
           wget -q https://github.com/jqssun/android-lineage-qemu/releases/download/v2026.03.18/UTM-VM-lineage-23.2-20260318-jqssun-virtio_arm64only.zip
           unzip -q UTM-VM-lineage-23.2-20260318-jqssun-virtio_arm64only.zip
           DATA_DIR=$(find . -type d -name "Data" | head -1)
           cp $DATA_DIR/vda.qcow2 system.qcow2
           cp $DATA_DIR/vdb.qcow2 data.qcow2
-
-          # 下载 recovery-userdebug.img（可直接启动）
-          wget -q https://github.com/jqssun/android-lineage-qemu/releases/download/v2026.03.18/recovery-userdebug.img
-
-          echo "文件就绪："
-          ls -lh system.qcow2 data.qcow2 recovery-userdebug.img
-
-      - name: 启动 QEMU（使用 recovery-userdebug.img 作为内核）
-        run: |
-          cd ~/lineage-images
-          cp /usr/share/AAVMF/AAVMF_VARS.fd my_vars.fd
+          
+          # 扩展 UTM 原版 efivars 至 64MB
+          cp $DATA_DIR/efi_vars.fd my_vars.fd
+          truncate -s 64M my_vars.fd
           chmod 666 my_vars.fd
 
-          # 直接用 recovery-userdebug.img 作为 -kernel，QEMU 能识别 Android boot image
+          echo "文件就绪："
+          ls -lh system.qcow2 data.qcow2 my_vars.fd
+
+      - name: 启动 QEMU（UEFI 引导，无需指定内核）
+        run: |
+          cd ~/lineage-images
           qemu-system-aarch64 \
             -M virt \
             -cpu max \
@@ -44,8 +41,6 @@ jobs:
             -smp 4 \
             -drive if=pflash,format=raw,file=/usr/share/AAVMF/AAVMF_CODE.fd,readonly=on \
             -drive if=pflash,format=raw,file=my_vars.fd \
-            -kernel recovery-userdebug.img \
-            -append "console=ttyAMA0 root=/dev/vda rw androidboot.force_normal_boot=1 androidboot.hardware=virtio" \
             -drive file=system.qcow2,format=qcow2,if=virtio,index=0 \
             -drive file=data.qcow2,format=qcow2,if=virtio,index=1 \
             -nic user,hostfwd=tcp::5555-:5555 \
