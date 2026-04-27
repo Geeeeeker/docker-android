@@ -1,4 +1,4 @@
-name: ARM64 Android 云手机 (手动控制)
+name: ARM64 Android 云手机 (手动-修复路径)
 
 on:
   workflow_dispatch:
@@ -11,39 +11,43 @@ jobs:
     steps:
       - name: 安装 Android SDK 和模拟器
         run: |
-          # 设置 SDK 路径
+          # 固定 SDK 路径
           export ANDROID_SDK_ROOT=$HOME/Library/Android/sdk
           mkdir -p $ANDROID_SDK_ROOT/cmdline-tools
           
-          # 下载最新命令行工具
+          # 下载并解压命令行工具
           curl -o cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-mac-11076708_latest.zip
           unzip -q cmdline-tools.zip -d $ANDROID_SDK_ROOT/cmdline-tools
-          
-          # 移动到正确目录
           mv $ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools $ANDROID_SDK_ROOT/cmdline-tools/latest
           
-          # 添加环境变量
-          echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> $GITHUB_PATH
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
+          # 临时加入 PATH，确保 sdkmanager 可用
+          export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$PATH"
           
-          # 同意许可
+          # 接受许可
           yes | sdkmanager --licenses
           
-          # 安装系统镜像和模拟器
+          # 安装必要组件（使用绝对路径也可以）
           sdkmanager "system-images;android-34;google_apis;arm64-v8a" "platforms;android-34" "emulator" "platform-tools"
+          
+          # 将路径写入环境文件，供后续步骤使用
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
+          echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> $GITHUB_PATH
+          echo "$ANDROID_SDK_ROOT/platform-tools" >> $GITHUB_PATH
+          echo "$ANDROID_SDK_ROOT/emulator" >> $GITHUB_PATH
 
       - name: 创建 AVD 并启动模拟器
         run: |
-          # 创建 AVD
+          # 创建 AVD（avdmanager 已在 PATH 中）
           echo "no" | avdmanager create avd -n test -k "system-images;android-34;google_apis;arm64-v8a" -d pixel_4
           
-          # 启动模拟器（后台运行）
+          # 启动模拟器（后台运行，使用绝对路径保证可靠）
           echo "启动模拟器..."
-          $ANDROID_SDK_ROOT/emulator/emulator -avd test -no-window -no-audio -no-boot-anim -netdelay none -netspeed full -gpu swiftshader_indirect -port 5554 &
+          $ANDROID_SDK_ROOT/emulator/emulator -avd test -no-window -no-audio -no-boot-anim \
+            -netdelay none -netspeed full -gpu swiftshader_indirect -port 5554 &
           
-          # 等待模拟器完全启动（最多等待 15 分钟）
+          # 等待模拟器完全启动（最多等待 30 分钟）
           echo "等待模拟器就绪..."
-          for i in {1..180}; do
+          for i in {1..360}; do
             if $ANDROID_SDK_ROOT/platform-tools/adb -s emulator-5554 shell getprop sys.boot_completed 2>/dev/null | grep -q '1'; then
               echo "模拟器启动成功！"
               break
@@ -52,53 +56,50 @@ jobs:
             sleep 5
           done
           
-          # 确保 boot completed 是 1
+          # 最后确认
           $ANDROID_SDK_ROOT/platform-tools/adb -s emulator-5554 wait-for-device
           $ANDROID_SDK_ROOT/platform-tools/adb -s emulator-5554 shell getprop sys.boot_completed
 
       - name: 配置 VNC + noVNC + Cloudflared 隧道
         run: |
-          # 1. 安装 scrcpy（提供 VNC）
+          # 安装 scrcpy（提供 VNC）
           brew install scrcpy
-          # 启动 scrcpy VNC 服务器
           scrcpy --vnc --vnc-addr=0.0.0.0:5900 --no-audio --no-window &
           sleep 5
           
-          # 2. 安装并启动 noVNC（网页桌面）
+          # 安装并启动 noVNC（网页桌面）
           brew install novnc
           pip3 install websockify
           websockify --web /usr/local/share/novnc 6080 localhost:5900 &
           sleep 3
           
-          # 3. 安装 cloudflared
+          # 安装 cloudflared
           curl -L -o cloudflared.pkg https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-amd64.pkg
           sudo installer -pkg cloudflared.pkg -target /
           
-          # 4. 启动隧道（ADB 和 noVNC）
+          # 启动两条隧道
           nohup cloudflared tunnel --url tcp://localhost:5555 > adb-tunnel.log 2>&1 &
           nohup cloudflared tunnel --url http://localhost:6080 > vnc-tunnel.log 2>&1 &
           sleep 15
           
-          # 5. 提取公网地址
+          # 提取公网域名
           ADB_HOST=$(grep -oP 'trycloudflare\.com\S+' adb-tunnel.log | head -1)
           VNC_HOST=$(grep -oP '(?<=https://)[^ ]+\.trycloudflare\.com' vnc-tunnel.log | head -1)
           
-          # 输出连接信息到标准输出
           echo "=========================================="
           if [ -n "$ADB_HOST" ]; then
             echo "📱 ADB 连接命令: adb connect ${ADB_HOST}:443"
           else
-            echo "❌ ADB 隧道域名获取失败，查看 adb-tunnel.log"
+            echo "❌ ADB 隧道域名获取失败，查看 adb-tunnel.log："
             cat adb-tunnel.log
           fi
           if [ -n "$VNC_HOST" ]; then
             echo "🌐 浏览器桌面地址: https://${VNC_HOST}"
           else
-            echo "❌ 浏览器桌面隧道失败，查看 vnc-tunnel.log"
+            echo "❌ 浏览器桌面隧道失败，查看 vnc-tunnel.log："
             cat vnc-tunnel.log
           fi
           echo "=========================================="
           echo "实例将保持运行 6 小时，请尽快使用。"
           
-          # 保持在线
           sleep 21600
