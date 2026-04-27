@@ -1,4 +1,4 @@
-name: QEMU LineageOS 云手机 (Magisk 解包)
+name: QEMU LineageOS 云手机 (Magisk 解包 + DTB)
 
 on:
   workflow_dispatch:
@@ -17,7 +17,6 @@ jobs:
       - name: 下载并解包镜像
         run: |
           mkdir -p ~/lineage-images && cd ~/lineage-images
-          # 下载 UTM 主镜像
           wget -q https://github.com/jqssun/android-lineage-qemu/releases/download/v2026.03.18/UTM-VM-lineage-23.2-20260318-jqssun-virtio_arm64only.zip
           unzip -q UTM-VM-lineage-23.2-20260318-jqssun-virtio_arm64only.zip
           DATA_DIR=$(find . -type d -name "Data" | head -1)
@@ -27,7 +26,7 @@ jobs:
           # 下载 boot.img
           wget -q https://github.com/jqssun/android-lineage-qemu/releases/download/v2026.03.18/boot.img
 
-          # 下载 MagiskBoot 工具 (x86_64 静态编译)
+          # 下载 MagiskBoot
           wget -q https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk
           unzip -j Magisk-v27.0.apk "lib/x86_64/libmagiskboot.so" -d .
           mv libmagiskboot.so magiskboot
@@ -35,22 +34,24 @@ jobs:
 
           # 解包 boot.img
           ./magiskboot unpack boot.img
-          # 解包后生成 kernel 和 ramdisk.cpio (可能是 .gz 或 .cpio)
-          mv kernel kernel
-          mv ramdisk.cpio ramdisk.cpio
+          # 输出文件: kernel, ramdisk.cpio (可能 lz4 压缩), kernel_dtb, ...
 
-          echo "解包完成，列出文件："
-          ls -lh kernel ramdisk.cpio system.qcow2 data.qcow2
+          # 处理 ramdisk：如果为压缩格式，则解压为纯 cpio
+          if ./magiskboot decompress ramdisk.cpio ramdisk.img > /dev/null 2>&1; then
+            mv ramdisk.img ramdisk.cpio
+            echo "ramdisk 已解压"
+          else
+            echo "ramdisk 已是原始 cpio，无需解压"
+          fi
 
-      - name: 启动 QEMU (直接内核引导)
+          echo "解包完成，文件列表："
+          ls -lh kernel ramdisk.cpio kernel_dtb system.qcow2 data.qcow2
+
+      - name: 启动 QEMU (带设备树)
         run: |
           cd ~/lineage-images
-          # 准备 UEFI 变量文件（64MB）
           cp /usr/share/AAVMF/AAVMF_VARS.fd my_vars.fd
           chmod 666 my_vars.fd
-
-          # 内核命令行：只保留控制台和硬件信息，root 由 ramdisk 处理
-          CMDLINE="console=ttyAMA0 androidboot.hardware=virtio androidboot.slot_suffix="
 
           qemu-system-aarch64 \
             -M virt \
@@ -61,7 +62,8 @@ jobs:
             -drive if=pflash,format=raw,file=my_vars.fd \
             -kernel kernel \
             -initrd ramdisk.cpio \
-            -append "${CMDLINE}" \
+            -dtb kernel_dtb \
+            -append "console=ttyAMA0 androidboot.hardware=virtio androidboot.slot_suffix=" \
             -drive file=system.qcow2,format=qcow2,if=virtio,index=0 \
             -drive file=data.qcow2,format=qcow2,if=virtio,index=1 \
             -nic user,hostfwd=tcp::5555-:5555 \
@@ -69,7 +71,7 @@ jobs:
             -daemonize
 
           echo "QEMU 已启动，等待系统启动 (180s)..."
-          sleep 30
+          sleep 180
 
       - name: 建立 noVNC 与隧道
         run: |
