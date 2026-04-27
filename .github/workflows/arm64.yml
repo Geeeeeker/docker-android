@@ -1,4 +1,4 @@
-name: ARM64 Android 云手机 (macOS + noVNC)
+name: ARM64 Android 云手机 (macOS + scrcpy + noVNC)
 
 on:
   workflow_dispatch:
@@ -9,7 +9,7 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: 准备 Android SDK 和模拟器
+      - name: 启动 Android 模拟器 (ARM64)
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
@@ -23,50 +23,56 @@ jobs:
             -no-boot-anim
             -netdelay none
             -netspeed full
-            -vnc :0
           script: |
-            echo "模拟器已通过 VNC 在 5900 端口提供画面"
+            echo "模拟器已启动，正在配置远程桌面..."
 
-            # 1. 安装 noVNC + websockify
+            # 确保 ADB 设备已就绪
+            adb wait-for-device
+
+            # 1. 安装 scrcpy（自带 VNC 功能）
+            brew install scrcpy
+
+            # 2. 启动 scrcpy VNC 服务器（监听 5900 端口）
+            scrcpy --vnc --vnc-addr=0.0.0.0:5900 --no-audio --no-window &
+            sleep 5
+
+            # 3. 安装 noVNC + websockify
             brew install novnc
             pip3 install websockify
 
-            # 2. 启动 noVNC 代理 (VNC 5900 → websocket 6080)
+            # 4. 启动 noVNC 代理（VNC 5900 → 浏览器 6080）
             websockify --web /usr/local/share/novnc 6080 localhost:5900 &
             sleep 3
 
-            # 3. 安装 cloudflared
+            # 5. 安装 cloudflared（用于公网隧道）
             curl -L -o cloudflared.pkg https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-amd64.pkg
             sudo installer -pkg cloudflared.pkg -target /
 
-            # 4. 启动两条隧道：
-            #    - ADB 端口（5555）→ TCP 公网地址
-            #    - noVNC 端口（6080）→ HTTP 公网地址
+            # 6. 启动两条隧道：
+            #    ADB 端口（5555）→ TCP 公网
+            #    noVNC 端口（6080）→ HTTP 公网
             nohup cloudflared tunnel --url tcp://localhost:5555 > adb-tunnel.log 2>&1 &
             nohup cloudflared tunnel --url http://localhost:6080 > vnc-tunnel.log 2>&1 &
             sleep 15
 
-            # 5. 提取公网域名
-            ADB_HOST=$(grep -oP '(?<=trycloudflare\.com)[^\s]*' adb-tunnel.log | head -1)
+            # 7. 提取公网域名
+            ADB_HOST=$(grep -oP 'trycloudflare\.com\S+' adb-tunnel.log | head -1)
             VNC_HOST=$(grep -oP '(?<=https://)[^ ]+\.trycloudflare\.com' vnc-tunnel.log | head -1)
 
-            if [ -z "$ADB_HOST" ]; then
-              echo "❌ 无法获取 ADB 隧道域名，查看 adb-tunnel.log："
-              cat adb-tunnel.log
+            echo "=========================================="
+            if [ -n "$ADB_HOST" ]; then
+              echo "📱 ADB 连接命令: adb connect ${ADB_HOST}:443"
             else
-              echo "✅ ADB 连接命令: adb connect ${ADB_HOST}:443"
+              echo "❌ ADB 隧道失败，请查看 adb-tunnel.log"
             fi
 
-            if [ -z "$VNC_HOST" ]; then
-              echo "❌ 无法获取 VNC 隧道域名，查看 vnc-tunnel.log："
-              cat vnc-tunnel.log
+            if [ -n "$VNC_HOST" ]; then
+              echo "🌐 浏览器桌面地址: https://${VNC_HOST}"
             else
-              echo "✅ 浏览器桌面地址: https://${VNC_HOST}"
+              echo "❌ VNC 隧道失败，请查看 vnc-tunnel.log"
             fi
-
             echo "=========================================="
-            echo "容器将保持运行 6 小时，请尽快使用。"
-            echo "=========================================="
+            echo "实例将保持运行 6 小时，请尽快使用。"
 
-            # 保持脚本不退出，避免模拟器被终止
+            # 保持容器不退出
             sleep 21600
