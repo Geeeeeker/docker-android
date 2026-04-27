@@ -1,40 +1,16 @@
-name: QEMU LineageOS 云手机 (最终版)
-
-on:
-  workflow_dispatch:
-
-jobs:
-  qemu-android:
-    runs-on: ubuntu-latest
-    timeout-minutes: 360
-
-    steps:
-      - name: 安装依赖
-        run: |
-          sudo apt update
-          sudo apt install -y qemu-system-arm qemu-utils unzip wget novnc python3-websockify qemu-efi-aarch64
-
-      - name: 下载并准备 LineageOS 镜像
-        run: |
-          mkdir -p ~/lineage-images && cd ~/lineage-images
-          wget -q https://github.com/jqssun/android-lineage-qemu/releases/download/v2026.03.18/UTM-VM-lineage-23.2-20260318-jqssun-virtio_arm64only.zip
-          unzip -q UTM-VM-lineage-23.2-20260318-jqssun-virtio_arm64only.zip
-          DATA_DIR=$(find . -type d -name "Data" | head -1)
-          cp $DATA_DIR/vda.qcow2 system.qcow2
-          cp $DATA_DIR/vdb.qcow2 data.qcow2
-          echo "磁盘镜像已就绪"
-          ls -lh system.qcow2 data.qcow2
-
-      - name: 启动 QEMU（使用系统 UEFI 固件）
+      - name: 启动 QEMU（复制 UEFI 变量文件到工作目录）
         run: |
           cd ~/lineage-images
+          # 复制 AAVMF_VARS.fd 到本地，赋予写权限
+          cp /usr/share/AAVMF/AAVMF_VARS.fd my_vars.fd
+          chmod 666 my_vars.fd
           qemu-system-aarch64 \
             -M virt \
             -cpu max \
             -m 4096 \
             -smp 4 \
             -drive if=pflash,format=raw,file=/usr/share/AAVMF/AAVMF_CODE.fd,readonly=on \
-            -drive if=pflash,format=raw,file=/usr/share/AAVMF/AAVMF_VARS.fd \
+            -drive if=pflash,format=raw,file=my_vars.fd \
             -drive file=system.qcow2,format=qcow2,if=virtio,index=0 \
             -drive file=data.qcow2,format=qcow2,if=virtio,index=1 \
             -nic user,hostfwd=tcp::5555-:5555 \
@@ -42,22 +18,3 @@ jobs:
             -daemonize
           echo "QEMU 已启动，等待 Android 启动（180s）..."
           sleep 180
-
-      - name: 建立 noVNC 与隧道
-        run: |
-          websockify --web /usr/share/novnc 6080 localhost:5900 &
-          curl -L -o cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-          sudo dpkg -i cloudflared.deb
-          nohup cloudflared tunnel --url tcp://localhost:5555 > adb-tunnel.log 2>&1 &
-          nohup cloudflared tunnel --url http://localhost:6080 > novnc-tunnel.log 2>&1 &
-          sleep 20
-
-          ADB_HOST=$(grep -oP 'https?://\K[^\s]+\.trycloudflare\.com' adb-tunnel.log | head -1)
-          NOVNC_HOST=$(grep -oP 'https?://\K[^\s]+\.trycloudflare\.com' novnc-tunnel.log | head -1)
-
-          echo "=========================================="
-          echo "📱 ADB 连接：  adb connect ${ADB_HOST}:443"
-          echo "🌐 浏览器桌面： https://${NOVNC_HOST}"
-          echo "=========================================="
-          echo "实例保持运行 6 小时"
-          sleep 21600
