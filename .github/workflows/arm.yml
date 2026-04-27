@@ -1,28 +1,22 @@
-name: ARM64 Android 云手机 (Linux ARM)
+name: ARM64 Android 云手机 (Linux ARM - TCG)
 
 on:
   workflow_dispatch:
 
 jobs:
   android:
-    runs-on: ubuntu-22.04-arm   # 真·ARM 硬件，KVM 可用
+    runs-on: ubuntu-22.04-arm   # ARM64 原生环境，无需 KVM 也能运行
     timeout-minutes: 360
 
     steps:
-      - name: 开启 KVM 权限
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666"' | sudo tee /etc/udev/rules.d/99-kvm.rules
-          sudo udevadm control --reload-rules && sudo udevadm trigger
-          sudo chmod 666 /dev/kvm
-
-      - name: 运行 ARM64 模拟器并配置远程桌面
+      - name: 启动 Android 模拟器 (ARM64, 无硬件加速)
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
           arch: arm64-v8a
           target: google_apis
           profile: pixel_4
-          disable-linux-hw-accel: false   # 启用 KVM
+          disable-linux-hw-accel: true      # 关闭 KVM，改用软件模拟（TCG）
           emulator-options: >-
             -no-window
             -gpu swiftshader_indirect
@@ -30,27 +24,31 @@ jobs:
             -no-boot-anim
             -netdelay none
             -netspeed full
-            -qemu -vnc :0
           script: |
-            echo "模拟器已启动，VNC 在 5900 端口"
-
-            # 等待设备完全启动
+            echo "模拟器已启动，正在配置 VNC 和隧道..."
             adb wait-for-device
 
-            # 1. 安装 noVNC + websockify
+            # 1. 安装 scrcpy (提供 VNC 输出)
             sudo apt update
-            sudo apt install -y novnc websockify python3-websockify
+            sudo apt install -y scrcpy
 
-            # 2. 启动 noVNC（将 VNC 5900 转成浏览器可访问的 HTTP 6080）
+            # 启动 scrcpy VNC 服务器 (监听 5900)
+            scrcpy --vnc --vnc-addr=0.0.0.0:5900 --no-audio --no-window &
+            sleep 5
+
+            # 2. 安装 noVNC + websockify (将 VNC 转为浏览器可访问的网页)
+            sudo apt install -y novnc python3-websockify
             websockify --web /usr/share/novnc 6080 localhost:5900 &
             sleep 3
 
-            # 3. 安装 cloudflared (ARM64 版)
+            # 3. 安装 cloudflared (ARM64 版本)
             curl -L -o cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64
             chmod +x cloudflared
             sudo mv cloudflared /usr/local/bin/
 
-            # 4. 启动两条隧道
+            # 4. 启动两条隧道：
+            #    ADB 端口 (5555) → TCP 公网
+            #    noVNC 端口 (6080) → HTTP 公网
             nohup cloudflared tunnel --url tcp://localhost:5555 > adb-tunnel.log 2>&1 &
             nohup cloudflared tunnel --url http://localhost:6080 > vnc-tunnel.log 2>&1 &
             sleep 15
@@ -75,5 +73,5 @@ jobs:
             echo "=========================================="
             echo "实例将保持运行 6 小时，请尽快使用。"
 
-            # 保持活跃
+            # 保持实例不退出
             sleep 21600
