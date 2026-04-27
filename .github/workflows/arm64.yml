@@ -115,7 +115,8 @@ jobs:
         if: env.ARCH == 'arm64'
         run: |
           sudo apt update
-          sudo apt install -y qemu-system-arm libgl1 libpulse0 libnss3 libasound2 libxcomposite1 libxdamage1 libxrandr2 libxcursor1 libxi6 libxtst6
+          sudo apt install -y qemu-system-arm libgl1 libpulse0 libnss3 libasound2t64 \
+            libxcomposite1 libxdamage1 libxrandr2 libxcursor1 libxi6 libxtst6
 
       - name: 配置 noVNC（arm64）
         if: env.ARCH == 'arm64'
